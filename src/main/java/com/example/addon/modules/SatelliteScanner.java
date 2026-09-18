@@ -8,9 +8,9 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.orbit.EventHandler;
 
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.player.PlayerEntity;
-import net.minecraft.world.phys.AABB;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.util.math.Box;
 
 public class SatelliteScanner extends Module {
     private final SettingGroup sg = settings.getDefaultGroup();
@@ -37,25 +37,25 @@ public class SatelliteScanner extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        if (mc.player == null || mc.level == null) return;
+        if (mc.player == null || mc.world == null) return;
         if (++timer < 40) return;
         timer = 0;
 
         double r = range.get();
         var p = mc.player;
 
-        AABB box = new AABB(
+        Box box = new Box(
             p.getX() - r, p.getY() - r, p.getZ() - r,
             p.getX() + r, p.getY() + r, p.getZ() + r
         );
 
-        for (Entity e : mc.level.getOtherEntities(p, box,
-            ent -> ent != p && ent.distanceToSqr(p) <= r * r)) {
+        for (Entity e : mc.world.getOtherEntities(p, box,
+            ent -> ent != p && ent.squaredDistanceTo(p) <= r * r)) {
 
             String kind = e instanceof PlayerEntity ? "Player" : e.getType().toString();
             info("卫星: %s @ %.1f %.1f %.1f dist=%.1f",
                 kind, e.getX(), e.getY(), e.getZ(),
-                Math.sqrt(e.distanceToSqr(p)));
+                Math.sqrt(e.squaredDistanceTo(p)));
         }
     }
 }
