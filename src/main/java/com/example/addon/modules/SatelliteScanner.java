@@ -6,11 +6,10 @@ import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.Utils;
+import meteordevelopment.meteorclient.utils.entity.EntityUtils;
+import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.orbit.EventHandler;
-
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.util.math.Box;
 
 public class SatelliteScanner extends Module {
     private final SettingGroup sg = settings.getDefaultGroup();
@@ -37,25 +36,23 @@ public class SatelliteScanner extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        if (mc.player == null || mc.world == null) return;
+        if (!Utils.canUpdate() || mc.player == null) return;
         if (++timer < 40) return;
         timer = 0;
 
         double r = range.get();
-        var p = mc.player;
+        double r2 = r * r;
 
-        Box box = new Box(
-            p.getX() - r, p.getY() - r, p.getZ() - r,
-            p.getX() + r, p.getY() + r, p.getZ() + r
-        );
+        for (var e : EntityUtils.getEntities()) {
+            if (e == mc.player) continue;
+            if (mc.player.squaredDistanceTo(e) > r2) continue;
 
-        for (Entity e : mc.world.getOtherEntities(p, box,
-            ent -> ent != p && ent.squaredDistanceTo(p) <= r * r)) {
-
-            String kind = e instanceof PlayerEntity ? "Player" : e.getType().toString();
+            String kind = EntityUtils.isPlayer(e) ? "Player" : EntityUtils.getName(e);
             info("卫星: %s @ %.1f %.1f %.1f dist=%.1f",
-                kind, e.getX(), e.getY(), e.getZ(),
-                Math.sqrt(e.squaredDistanceTo(p)));
+                kind,
+                e.getX(), e.getY(), e.getZ(),
+                PlayerUtils.distanceToCamera(e)
+            );
         }
     }
 }
