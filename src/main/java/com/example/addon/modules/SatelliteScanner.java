@@ -1,30 +1,29 @@
-package comet.satellite.modules;
+package com.example.addon.modules;
 
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.world.World;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.projectile.thrown.EnderPearlEntity;
-import net.minecraft.block.entity.BlockEntity;
-import net.minecraft.block.entity.ShulkerBoxBlockEntity;
-import net.minecraft.block.entity.EnderChestBlockEntity;
-import net.minecraft.block.entity.HopperBlockEntity;
-import net.minecraft.block.entity.DispenserBlockEntity;
-import net.minecraft.block.entity.DropperBlockEntity;
-import net.minecraft.block.entity.ChestBlockEntity;
-import net.minecraft.block.entity.TrappedChestBlockEntity;
-import net.minecraft.block.entity.BarrelBlockEntity;
-
-import java.util.HashSet;
-import java.util.Set;
-
+import com.example.addon.AddonTemplate;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.entity.BarrelBlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.ChestBlockEntity;
+import net.minecraft.world.level.block.entity.DispenserBlockEntity;
+import net.minecraft.world.level.block.entity.DropperBlockEntity;
+import net.minecraft.world.level.block.entity.EnderChestBlockEntity;
+import net.minecraft.world.level.block.entity.HopperBlockEntity;
+import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
+import net.minecraft.world.level.block.entity.TrappedChestBlockEntity;
+import net.minecraft.world.phys.AABB;
 
-// 假设 AddonTemplate 和基类设置与你项目一致
+import java.util.HashSet;
+import java.util.Set;
+
 public class SatelliteScanner extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
 
@@ -92,25 +91,25 @@ public class SatelliteScanner extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        MinecraftClient mc = MinecraftClient.getInstance();
-        if (mc.player == null || mc.world == null) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || mc.level == null) return;
 
         if (++tickTimer < 10) return;
         tickTimer = 0;
 
         double r = range.get();
-        Box box = r <= 0
-            ? new Box(-3E7, -512, -3E7, 3E7, 512, 3E7)
-            : new Box(
+        AABB box = r <= 0
+            ? new AABB(-3E7, -512, -3E7, 3E7, 512, 3E7)
+            : new AABB(
                 mc.player.getX() - r, mc.player.getY() - r, mc.player.getZ() - r,
                 mc.player.getX() + r, mc.player.getY() + r, mc.player.getZ() + r
             );
 
-        World world = mc.world;
+        Level world = mc.level;
 
         /* ========== 末影珍珠 ========== */
         if (pearls.get()) {
-            for (Entity e : world.getEntitiesByClass(EnderPearlEntity.class, box, ent -> true)) {
+            for (Entity e : world.getEntitiesOfClass(Entity.class, box, ent -> ent.getType() == EntityType.ENDER_PEARL)) {
                 int id = e.getId();
                 if (seenPearls.add(id)) {
                     info("[雷达锁定-末影珍珠] X %.2f / Y %.2f / Z %.2f",
@@ -125,12 +124,12 @@ public class SatelliteScanner extends Module {
 
         if (scanBlocks) {
             int radius = r <= 0 ? 80 : (int) r;
-            BlockPos center = mc.player.getBlockPos();
+            BlockPos center = mc.player.blockPosition();
 
             for (int dx = -radius; dx <= radius; dx++)
             for (int dy = -radius; dy <= radius; dy++)
             for (int dz = -radius; dz <= radius; dz++) {
-                BlockPos pos = center.add(dx, dy, dz);
+                BlockPos pos = center.offset(dx, dy, dz);
                 BlockEntity be = world.getBlockEntity(pos);
                 if (be == null) continue;
 
