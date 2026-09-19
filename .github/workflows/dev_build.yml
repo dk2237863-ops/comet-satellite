@@ -4,6 +4,9 @@ on: push
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 之前你开的读写权限，这里显式声明更稳
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Repository
@@ -30,5 +33,10 @@ jobs:
           tag_name: snapshot
           name: Dev Build
           prerelease: true
-          files: |
-            ./build/libs/*.jar
+          files: ./build/libs/*.jar
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: comet-satellite-jar
+          path: build/libs/*.jar
