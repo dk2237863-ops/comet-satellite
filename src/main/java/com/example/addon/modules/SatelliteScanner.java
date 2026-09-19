@@ -6,13 +6,17 @@ import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.Utils;
-import meteordevelopment.meteorclient.utils.entity.EntityUtils;
-import meteordevelopment.meteorclient.utils.world.WorldUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.client.Minecraft;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.phys.AABB;
 
 public class SatelliteScanner extends Module {
     private final SettingGroup sg = settings.getDefaultGroup();
+    private final Minecraft mc = Minecraft.getInstance();
 
     private final Setting<Double> range = sg.add(new DoubleSetting.Builder()
         .name("range")
@@ -23,7 +27,7 @@ public class SatelliteScanner extends Module {
         .build()
     );
 
-    private int timer;
+    private int timer = 0;
 
     public SatelliteScanner() {
         super(AddonTemplate.CATEGORY, "satellite-scanner", "Scans nearby entities/players and prints coordinates.");
@@ -36,22 +40,28 @@ public class SatelliteScanner extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        // Utils.canUpdate() 是 Meteor 判断世界是否加载的标准姿势
-        if (!Utils.canUpdate() || mc.player == null) return;
-        if (++timer < 40) return;
+        // 原生判断世界是否加载
+        if (mc.player == null || mc.level == null) return;
+
+        if (++timer < 40) return; // 防刷屏
         timer = 0;
 
+        Level level = mc.level;
         double r = range.get();
-        double rSq = r * r;
+        
+        // 原生 AABB 范围扫描
+        AABB box = mc.player.getBoundingBox().inflate(r);
 
-        // 关键修正：使用 WorldUtils.getEntities()
-        for (var e : WorldUtils.getEntities()) {
-            if (e == mc.player) continue;
-            if (mc.player.squaredDistanceTo(e) > rSq) continue;
+        for (Entity e : level.getEntities(mc.player, box, ent -> ent != mc.player)) {
+            String kind;
+            // 原生精准区分玩家与实体
+            if (e instanceof Player) {
+                kind = "Player";
+            } else {
+                // 原生获取实体 ID
+                kind = BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()).toString();
+            }
 
-            // EntityUtils 的判断方法在 26.2 依然存在
-            String kind = EntityUtils.isPlayer(e) ? "Player" : EntityUtils.getName(e);
-            
             info("卫星: [%s] @ [%.1f, %.1f, %.1f] 距离: [%.1f]",
                 kind,
                 e.getX(),
