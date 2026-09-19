@@ -1,26 +1,17 @@
 package com.example.addon.modules;
 
 import com.example.addon.AddonTemplate;
-import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.orbit.EventHandler;
 
-import net.minecraft.client.Minecraft;
-import net.minecraft.core.BlockPos;
-import net.minecraft.world.phys.AABB;
-import net.minecraft.world.level.Level;
-import net.minecraft.world.entity.projectile.ThrownEnderpearl;
-import net.minecraft.world.level.block.entity.BlockEntity;
-import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
-import net.minecraft.world.level.block.entity.EnderChestBlockEntity;
-import net.minecraft.world.level.block.entity.HopperBlockEntity;
-import net.minecraft.world.level.block.entity.DispenserBlockEntity;
-import net.minecraft.world.level.block.entity.DropperBlockEntity;
-import net.minecraft.world.level.block.entity.ChestBlockEntity;
-import net.minecraft.world.level.block.entity.TrappedChestBlockEntity;
-import net.minecraft.world.level.block.entity.BarrelBlockEntity;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.projectile.thrown.EnderPearlEntity;
+import net.minecraft.block.entity.*;
+import net.minecraft.world.World;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 
 import java.util.HashSet;
 import java.util.Set;
@@ -30,14 +21,14 @@ public class SatelliteScanner extends Module {
 
     private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
         .name("range")
-        .description("扫描半径（0为全加载区域）")
+        .description("扫描半径（设为0为全图）")
         .defaultValue(48.0)
         .min(0.0)
         .build());
 
     private final Setting<Boolean> pearls = sgGeneral.add(new BoolSetting.Builder()
         .name("ender-pearls")
-        .description("锁定首次进入雷达的末影珍珠，之后不再提示")
+        .description("扫描末影珍珠")
         .defaultValue(true)
         .build());
 
@@ -49,7 +40,7 @@ public class SatelliteScanner extends Module {
 
     private final Setting<Boolean> chests = sgGeneral.add(new BoolSetting.Builder()
         .name("chests")
-        .description("扫描箱子、陷阱箱、木桶")
+        .description("扫描储物箱/陷阱箱/木桶")
         .defaultValue(true)
         .build());
 
@@ -67,100 +58,92 @@ public class SatelliteScanner extends Module {
 
     private final Setting<Boolean> dispensers = sgGeneral.add(new BoolSetting.Builder()
         .name("dispensers-droppers")
-        .description("扫描发射器、投掷器")
+        .description("扫描发射器/投掷器")
         .defaultValue(true)
         .build());
 
-    private final Set<Integer> seenPearlIds = new HashSet<>();
-    private final Set<BlockPos> seenBlockPos = new HashSet<>();
+    private final Set<Integer> seenPearls = new HashSet<>();
+    private final Set<BlockPos> seenBlocks = new HashSet<>();
     private int tickTimer = 0;
 
     public SatelliteScanner() {
         super(
             AddonTemplate.CATEGORY,
             "satellite-scanner",
-            "雷达扫描：目标首次进入视野即锁定，珍珠永久静默，方块移位后新坐标再报"
+            "首次入雷达即锁定：珍珠永久静默，方块移位再报"
         );
     }
 
     @Override
     public void onActivate() {
-        seenPearlIds.clear();
-        seenBlockPos.clear();
+        seenPearls.clear();
+        seenBlocks.clear();
         tickTimer = 0;
-        ChatUtils.info("卫星扫描器已开启");
-    }
-
-    @Override
-    public void onDeactivate() {
-        ChatUtils.info("卫星扫描器已关闭");
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.player == null || mc.level == null) return;
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null || mc.world == null) return;
 
         if (++tickTimer < 10) return;
         tickTimer = 0;
 
         double r = range.get();
-        // 扫描区域：r≤0扫全图，否则扫以玩家为中心的r半径
-        AABB scanArea = r <= 0
-            ? new AABB(-3E7, -512, -3E7, 3E7, 512, 3E7)
-            : new AABB(
+        Box box = r <= 0
+            ? new Box(-3E7, -512, -3E7, 3E7, 512, 3E7)
+            : new Box(
                 mc.player.getX() - r, mc.player.getY() - r, mc.player.getZ() - r,
                 mc.player.getX() + r, mc.player.getY() + r, mc.player.getZ() + r
             );
 
-        Level level = mc.level;
+        World world = mc.world;
 
-        /* ========== 末影珍珠：首次入雷达永久锁定 ========== */
+        /* ========== 末影珍珠 ========== */
         if (pearls.get()) {
-            // 直接按末影珍珠类获取，Mojang映射标准写法，无需EntityType
-            for (ThrownEnderpearl pearl : level.getEntitiesOfClass(ThrownEnderpearl.class, scanArea)) {
-                int pearlId = pearl.getId();
-                if (seenPearlIds.add(pearlId)) {
-                    ChatUtils.info("[雷达锁定-末影珍珠] 首次坐标: X %.2f / Y %.2f / Z %.2f",
-                        pearl.getX(), pearl.getY(), pearl.getZ());
+            for (Entity e : world.getEntitiesByClass(EnderPearlEntity.class, box, ent -> true)) {
+                int id = e.getId();
+                if (seenPearls.add(id)) {
+                    info("[雷达锁定-末影珍珠] X %.2f / Y %.2f / Z %.2f",
+                        e.getX(), e.getY(), e.getZ());
                 }
             }
         }
 
-        /* ========== 方块：新坐标首次出现才报，移位再报 ========== */
+        /* ========== 方块 ========== */
         boolean scanBlocks = shulkers.get() || chests.get() || enderChests.get() || hoppers.get() || dispensers.get();
         if (scanBlocks) {
             int radius = r <= 0 ? 80 : (int) r;
-            BlockPos playerPos = mc.player.blockPosition();
+            BlockPos center = mc.player.getBlockPos();
 
-            for (int dx = -radius; dx <= radius; dx++) {
-                for (int dy = -radius; dy <= radius; dy++) {
-                    for (int dz = -radius; dz <= radius; dz++) {
-                        BlockPos pos = playerPos.offset(dx, dy, dz);
-                        BlockEntity be = level.getBlockEntity(pos);
-                        if (be == null) continue;
+            for (int dx = -radius; dx <= radius; dx++)
+            for (int dy = -radius; dy <= radius; dy++)
+            for (int dz = -radius; dz <= radius; dz++) {
+                BlockPos pos = center.add(dx, dy, dz);
+                BlockEntity be = world.getBlockEntity(pos);
+                if (be == null) continue;
 
-                        String label = matchBlock(be);
-                        if (label == null) continue;
+                String label = match(be);
+                if (label == null) continue;
 
-                        if (seenBlockPos.add(pos)) {
-                            ChatUtils.info("[雷达锁定-%s] 首次坐标: [%d, %d, %d]",
-                                label, pos.getX(), pos.getY(), pos.getZ());
-                        }
-                    }
+                if (seenBlocks.add(pos)) {
+                    info("[雷达锁定-%s] [%d, %d, %d]",
+                        label, pos.getX(), pos.getY(), pos.getZ());
                 }
             }
         }
     }
 
-    private String matchBlock(BlockEntity be) {
-        if (be instanceof ShulkerBoxBlockEntity) return shulkers.get() ? "潜影盒" : null;
-        if (be instanceof EnderChestBlockEntity) return enderChests.get() ? "末影箱" : null;
-        if (be instanceof HopperBlockEntity) return hoppers.get() ? "漏斗" : null;
-        if (be instanceof DispenserBlockEntity || be instanceof DropperBlockEntity)
-            return dispensers.get() ? "发射器/投掷器" : null;
-        if (be instanceof ChestBlockEntity || be instanceof TrappedChestBlockEntity || be instanceof BarrelBlockEntity)
-            return chests.get() ? "储物箱/陷阱箱/木桶" : null;
+    private String match(BlockEntity be) {
+        if (be instanceof ShulkerBoxBlockEntity)   return shulkers.get()    ? "潜影盒" : null;
+        if (be instanceof EnderChestBlockEntity)  return enderChests.get() ? "末影箱" : null;
+        if (be instanceof HopperBlockEntity)      return hoppers.get()     ? "漏斗" : null;
+        if (be instanceof DispenserBlockEntity || be instanceof DropperBlockEntity)     return dispensers.get()  ? "发射器/投掷器" : null;
+        if (be instanceof ChestBlockEntity || be instanceof TrappedChestBlockEntity || be instanceof BarrelBlockEntity)      return chests.get()      ? "储物箱/陷阱箱/木桶" : null;
         return null;
+    }
+
+    private void info(String format, Object... args) {
+        ChatUtils.info(String.format(format, args));
     }
 }
