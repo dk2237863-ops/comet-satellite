@@ -109,7 +109,7 @@ public class SatelliteScanner extends Module {
 
         /* ========== 末影珍珠 ========== */
         if (pearls.get()) {
-            for (Entity e : world.getEntitiesOfClass(Entity.class, box, ent -> ent.getType() == EntityType.ENDER_PEARL)) {
+            for (ThrownEnderpearl pearl : level.getEntitiesOfClass(ThrownEnderpearl.class, scanBox)) {
                 int id = e.getId();
                 if (seenPearls.add(id)) {
                     info("[雷达锁定-末影珍珠] X %.2f / Y %.2f / Z %.2f",
