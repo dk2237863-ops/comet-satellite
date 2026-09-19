@@ -1,10 +1,4 @@
-package com.example.addon.modules;
-
-import com.example.addon.AddonTemplate;
-import meteordevelopment.meteorclient.events.world.TickEvent;
-import meteordevelopment.meteorclient.settings.*;
-import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.orbit.EventHandler;
+package comet.satellite.modules;
 
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
@@ -12,30 +6,70 @@ import net.minecraft.util.math.Box;
 import net.minecraft.world.World;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.projectile.thrown.EnderPearlEntity;
-import net.minecraft.block.entity.*;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.entity.ShulkerBoxBlockEntity;
+import net.minecraft.block.entity.EnderChestBlockEntity;
+import net.minecraft.block.entity.HopperBlockEntity;
+import net.minecraft.block.entity.DispenserBlockEntity;
+import net.minecraft.block.entity.DropperBlockEntity;
+import net.minecraft.block.entity.ChestBlockEntity;
+import net.minecraft.block.entity.TrappedChestBlockEntity;
+import net.minecraft.block.entity.BarrelBlockEntity;
 
 import java.util.HashSet;
 import java.util.Set;
 
+import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.settings.*;
+import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.orbit.EventHandler;
+
+// 假设 AddonTemplate 和基类设置与你项目一致
 public class SatelliteScanner extends Module {
+    private final SettingGroup sgGeneral = settings.getDefaultGroup();
 
-    private final SettingGroup sg = settings.getDefaultGroup();
-
-    private final Setting<Double> range = sg.add(new DoubleSetting.Builder()
+    private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
         .name("range")
-        .description("雷达扫描半径（0=全加载区块）")
-        .defaultValue(48.0)
+        .description("扫描半径（0为全局）")
+        .defaultValue(0.0)
         .min(0.0)
-        .sliderMax(128.0)
-        .build()
-    );
+        .build());
 
-    private final Setting<Boolean> pearls      = sg.add(new BoolSetting.Builder().name("ender-pearls").defaultValue(true).build());
-    private final Setting<Boolean> shulkers    = sg.add(new BoolSetting.Builder().name("shulker-boxes").defaultValue(true).build());
-    private final Setting<Boolean> chests      = sg.add(new BoolSetting.Builder().name("chests").defaultValue(true).build());
-    private final Setting<Boolean> enderChests = sg.add(new BoolSetting.Builder().name("ender-chests").defaultValue(true).build());
-    private final Setting<Boolean> hoppers     = sg.add(new BoolSetting.Builder().name("hoppers").defaultValue(true).build());
-    private final Setting<Boolean> dispensers  = sg.add(new BoolSetting.Builder().name("dispensers-droppers").defaultValue(true).build());
+    private final Setting<Boolean> pearls = sgGeneral.add(new BoolSetting.Builder()
+        .name("pearls")
+        .description("扫描末影珍珠")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Boolean> shulkers = sgGeneral.add(new BoolSetting.Builder()
+        .name("shulkers")
+        .description("扫描潜影盒")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Boolean> chests = sgGeneral.add(new BoolSetting.Builder()
+        .name("chests")
+        .description("扫描箱子/陷阱箱/木桶")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Boolean> enderChests = sgGeneral.add(new BoolSetting.Builder()
+        .name("ender-chests")
+        .description("扫描末影箱")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Boolean> hoppers = sgGeneral.add(new BoolSetting.Builder()
+        .name("hoppers")
+        .description("扫描漏斗")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Boolean> dispensers = sgGeneral.add(new BoolSetting.Builder()
+        .name("dispensers")
+        .description("扫描发射器/投掷器")
+        .defaultValue(true)
+        .build());
 
     private final Set<Integer> seenPearls = new HashSet<>();
     private final Set<BlockPos> seenBlocks = new HashSet<>();
@@ -68,12 +102,8 @@ public class SatelliteScanner extends Module {
         Box box = r <= 0
             ? new Box(-3E7, -512, -3E7, 3E7, 512, 3E7)
             : new Box(
-                mc.player.getX() - r,
-                mc.player.getY() - r,
-                mc.player.getZ() - r,
-                mc.player.getX() + r,
-                mc.player.getY() + r,
-                mc.player.getZ() + r
+                mc.player.getX() - r, mc.player.getY() - r, mc.player.getZ() - r,
+                mc.player.getX() + r, mc.player.getY() + r, mc.player.getZ() + r
             );
 
         World world = mc.world;
@@ -116,18 +146,11 @@ public class SatelliteScanner extends Module {
     }
 
     private String match(BlockEntity be) {
-        if (be instanceof ShulkerBoxBlockEntity)
-            return shulkers.get() ? "潜影盒" : null;
-        if (be instanceof EnderChestBlockEntity)
-            return enderChests.get() ? "末影箱" : null;
-        if (be instanceof HopperBlockEntity)
-            return hoppers.get() ? "漏斗" : null;
-        if (be instanceof DispenserBlockEntity || be instanceof DropperBlockEntity)
-            return dispensers.get() ? "发射器/投掷器" : null;
-        if (be instanceof ChestBlockEntity ||
-            be instanceof TrappedChestBlockEntity ||
-            be instanceof BarrelBlockEntity)
-            return chests.get() ? "储物箱/陷阱箱/木桶" : null;
+        if (be instanceof ShulkerBoxBlockEntity)   return shulkers.get()    ? "潜影盒" : null;
+        if (be instanceof EnderChestBlockEntity)  return enderChests.get() ? "末影箱" : null;
+        if (be instanceof HopperBlockEntity)      return hoppers.get()     ? "漏斗" : null;
+        if (be instanceof DispenserBlockEntity || be instanceof DropperBlockEntity)     return dispensers.get()  ? "发射器/投掷器" : null;
+        if (be instanceof ChestBlockEntity || be instanceof TrappedChestBlockEntity || be instanceof BarrelBlockEntity)      return chests.get()      ? "储物箱/陷阱箱/木桶" : null;
         return null;
     }
 }
