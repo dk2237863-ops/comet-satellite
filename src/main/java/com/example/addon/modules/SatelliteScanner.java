@@ -1,19 +1,27 @@
 package com.example.addon.modules;
 
 import com.example.addon.AddonTemplate;
+import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.orbit.EventHandler;
-
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.projectile.thrown.EnderPearlEntity;
-import net.minecraft.block.entity.*;
-import net.minecraft.world.World;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
+import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.entity.BarrelBlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.ChestBlockEntity;
+import net.minecraft.world.level.block.entity.DispenserBlockEntity;
+import net.minecraft.world.level.block.entity.DropperBlockEntity;
+import net.minecraft.world.level.block.entity.EnderChestBlockEntity;
+import net.minecraft.world.level.block.entity.HopperBlockEntity;
+import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
+import net.minecraft.world.level.block.entity.TrappedChestBlockEntity;
+import net.minecraft.world.phys.AABB;
 
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 
 public class SatelliteScanner extends Module {
@@ -21,26 +29,26 @@ public class SatelliteScanner extends Module {
 
     private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
         .name("range")
-        .description("扫描半径（设为0为全图）")
-        .defaultValue(48.0)
+        .description("扫描半径（0为全局）")
+        .defaultValue(0.0)
         .min(0.0)
         .build());
 
     private final Setting<Boolean> pearls = sgGeneral.add(new BoolSetting.Builder()
-        .name("ender-pearls")
+        .name("pearls")
         .description("扫描末影珍珠")
         .defaultValue(true)
         .build());
 
     private final Setting<Boolean> shulkers = sgGeneral.add(new BoolSetting.Builder()
-        .name("shulker-boxes")
+        .name("shulkers")
         .description("扫描潜影盒")
         .defaultValue(true)
         .build());
 
     private final Setting<Boolean> chests = sgGeneral.add(new BoolSetting.Builder()
         .name("chests")
-        .description("扫描储物箱/陷阱箱/木桶")
+        .description("扫描箱子/陷阱箱/木桶")
         .defaultValue(true)
         .build());
 
@@ -57,7 +65,7 @@ public class SatelliteScanner extends Module {
         .build());
 
     private final Setting<Boolean> dispensers = sgGeneral.add(new BoolSetting.Builder()
-        .name("dispensers-droppers")
+        .name("dispensers")
         .description("扫描发射器/投掷器")
         .defaultValue(true)
         .build());
@@ -83,25 +91,25 @@ public class SatelliteScanner extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        MinecraftClient mc = MinecraftClient.getInstance();
-        if (mc.player == null || mc.world == null) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null || mc.level == null) return;
 
         if (++tickTimer < 10) return;
         tickTimer = 0;
 
         double r = range.get();
-        Box box = r <= 0
-            ? new Box(-3E7, -512, -3E7, 3E7, 512, 3E7)
-            : new Box(
+        AABB box = r <= 0
+            ? new AABB(-3E7, -512, -3E7, 3E7, 512, 3E7)
+            : new AABB(
                 mc.player.getX() - r, mc.player.getY() - r, mc.player.getZ() - r,
                 mc.player.getX() + r, mc.player.getY() + r, mc.player.getZ() + r
             );
 
-        World world = mc.world;
+        Level world = mc.level;
 
         /* ========== 末影珍珠 ========== */
         if (pearls.get()) {
-            for (Entity e : world.getEntitiesByClass(EnderPearlEntity.class, box, ent -> true)) {
+            for (Entity e : world.getEntitiesOfClass(Entity.class, box, ent -> ent.getClass().getSimpleName().toLowerCase(Locale.ROOT).contains("enderpearl"))) {
                 int id = e.getId();
                 if (seenPearls.add(id)) {
                     info("[雷达锁定-末影珍珠] X %.2f / Y %.2f / Z %.2f",
@@ -111,15 +119,17 @@ public class SatelliteScanner extends Module {
         }
 
         /* ========== 方块 ========== */
-        boolean scanBlocks = shulkers.get() || chests.get() || enderChests.get() || hoppers.get() || dispensers.get();
+        boolean scanBlocks =
+            shulkers.get() || chests.get() || enderChests.get() || hoppers.get() || dispensers.get();
+
         if (scanBlocks) {
             int radius = r <= 0 ? 80 : (int) r;
-            BlockPos center = mc.player.getBlockPos();
+            BlockPos center = mc.player.blockPosition();
 
             for (int dx = -radius; dx <= radius; dx++)
             for (int dy = -radius; dy <= radius; dy++)
             for (int dz = -radius; dz <= radius; dz++) {
-                BlockPos pos = center.add(dx, dy, dz);
+                BlockPos pos = center.offset(dx, dy, dz);
                 BlockEntity be = world.getBlockEntity(pos);
                 if (be == null) continue;
 
@@ -141,9 +151,5 @@ public class SatelliteScanner extends Module {
         if (be instanceof DispenserBlockEntity || be instanceof DropperBlockEntity)     return dispensers.get()  ? "发射器/投掷器" : null;
         if (be instanceof ChestBlockEntity || be instanceof TrappedChestBlockEntity || be instanceof BarrelBlockEntity)      return chests.get()      ? "储物箱/陷阱箱/木桶" : null;
         return null;
-    }
-
-    private void info(String format, Object... args) {
-        ChatUtils.info(String.format(format, args));
     }
 }
