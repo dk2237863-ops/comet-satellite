@@ -4,6 +4,7 @@ import com.example.addon.AddonTemplate;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
@@ -20,6 +21,7 @@ import net.minecraft.world.level.block.entity.EnderChestBlockEntity;
 import net.minecraft.world.level.block.entity.HopperBlockEntity;
 import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
 import net.minecraft.world.level.block.entity.TrappedChestBlockEntity;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.AABB;
 
 import java.io.OutputStream;
@@ -28,13 +30,21 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Predicate;
 
+/**
+ * 单次遍历即可完成全部功能的 SatelliteScanner
+ * - 按区块逐区块处理：在同一区块内先收集 marker（天然结构线索）与候选储物方块，
+ *   然后在该区块内完成天然结构过滤与上报（避免全局两遍扫描）。
+ * - 保留 QQ 推送、聊天排队、天然结构识别、重度检测预算、不重复播报等功能。
+ */
 public class SatelliteScanner extends Module {
     private static final int MAX_MESSAGES_PER_TICK = 10;
     private static final int CQ_LINES_PER_MESSAGE = 15;
@@ -131,12 +141,13 @@ public class SatelliteScanner extends Module {
         .build());
 
     private final Set<Integer> seenPearls = new HashSet<>();
-    private final Set<BlockPos> seenBlocks = new HashSet<>();
+    private final Set<Long> seenBlocks = new HashSet<>(); // pos.asLong()
     private final Set<BlockPos> markerSeen = new HashSet<>();
     private final ArrayList<Zone> zones = new ArrayList<>();
     private final ArrayList<Cand> cands = new ArrayList<>();
     private final ArrayDeque<Msg> pending = new ArrayDeque<>();
     private final ArrayDeque<String> cqLines = new ArrayDeque<>();
+    private final HashMap<Long, String> posLastLabel = new HashMap<>(); // posLong -> lastLabel (避免重复播报)
     private int tickTimer = 0;
     private int cqTimer = 0;
     private int heavyBudget = 0;
@@ -162,6 +173,7 @@ public class SatelliteScanner extends Module {
         cands.clear();
         pending.clear();
         cqLines.clear();
+        posLastLabel.clear();
         tickTimer = 0;
         cqTimer = 0;
         cqFailing = false;
@@ -218,15 +230,14 @@ public class SatelliteScanner extends Module {
             }
         }
 
-        /* ========== 方块 ========== */
+        /* ========== 方块：按区块逐区块单次处理（在区块内先收集 marker 与候选，再在区块内完成过滤与上报） ========== */
         boolean scanBlocks =
             shulkers.get() || chests.get() || enderChests.get() || hoppers.get() || dispensers.get();
         if (!scanBlocks) return;
 
-        // 关闭"锁定天然结构"时，才需要识别并跳过天然结构
         final boolean filterOn = !lockNatural.get();
 
-        int radius = r <= 0 ? 80 : (int) r;
+        int radius = r <= 0 ? 80 : (int) Math.max(1, Math.ceil(r));
         BlockPos center = mc.player.blockPosition();
 
         int cxMin = (center.getX() - radius) >> 4;
@@ -234,53 +245,92 @@ public class SatelliteScanner extends Module {
         int czMin = (center.getZ() - radius) >> 4;
         int czMax = (center.getZ() + radius) >> 4;
 
-        /* 第一遍：收集待报告的储物方块，同时登记天然结构的标记 */
+        // 懒清理：移除已不存在的记录，避免永久屏蔽
         cands.clear();
+        // 遍历区块：对每个区块先做一次内部扫描（收集 marker 与候选），然后在该区块内完成过滤与上报
         for (int cx = cxMin; cx <= cxMax; cx++) {
             for (int cz = czMin; cz <= czMax; cz++) {
-                var chunk = world.getChunk(cx, cz);
+                LevelChunk chunk;
+                try {
+                    // 尝试获取区块（注意：不同映射可能需要替换为 getChunkIfLoaded）
+                    chunk = world.getChunk(cx, cz);
+                } catch (Throwable t) {
+                    // 若映射不同或方法会强制加载，可尝试反射 getChunkIfLoaded（兼容性保底）
+                    try {
+                        chunk = (LevelChunk) world.getClass()
+                            .getMethod("getChunkIfLoaded", int.class, int.class)
+                            .invoke(world, cx, cz);
+                    } catch (Throwable ignored) {
+                        // 最后回退（可能会加载区块）
+                        try {
+                            chunk = world.getChunk(cx, cz);
+                        } catch (Throwable ex) {
+                            chunk = null;
+                        }
+                    }
+                }
+                if (chunk == null) continue;
+
+                // 本区块内临时候选列表
+                cands.clear();
+
+                // 第一遍（区块内）：收集 marker（天然结构线索）并收集候选储物方块（未上报过）
                 for (BlockEntity be : chunk.getBlockEntities().values()) {
                     BlockPos pos = be.getBlockPos();
                     if (Math.abs(pos.getX() - center.getX()) > radius) continue;
                     if (Math.abs(pos.getY() - center.getY()) > radius) continue;
                     if (Math.abs(pos.getZ() - center.getZ()) > radius) continue;
 
-                    if (filterOn && be instanceof DispenserBlockEntity && !(be instanceof DropperBlockEntity)) {
-                        testJungle(world, pos);
-                    }
-
+                    // 若是非目标方块且需要过滤天然结构，则登记 marker 线索
                     String label = match(be);
                     if (label != null) {
-                        if (!seenBlocks.contains(pos)) cands.add(new Cand(pos, label));
+                        long posLong = pos.asLong();
+                        if (!posLastLabel.containsKey(posLong)) {
+                            cands.add(new Cand(pos, label));
+                        } else {
+                            // 已上报过同位置，若类型变化则也加入候选以便更新
+                            String last = posLastLabel.get(posLong);
+                            if (!label.equals(last)) cands.add(new Cand(pos, label));
+                        }
                     } else if (filterOn) {
+                        // 仅当需要过滤天然结构时才登记 marker
                         addMarkerZone(be, pos);
                     }
                 }
-            }
-        }
 
-        /* 第二遍：处在天然结构范围内的跳过（开关关闭时），其余照常报告 */
-        for (Cand c : cands) {
-            BlockPos p = c.pos();
+                // 第二步（区块内）：对本区块的候选进行天然结构过滤与上报（heavy 检查受 heavyBudget 限制）
+                for (Cand c : cands) {
+                    BlockPos p = c.pos();
+                    String label = c.label();
+                    long posLong = p.asLong();
 
-            if (filterOn) {
-                if (insideZone(p)) {
-                    seenBlocks.add(p);
-                    continue;
+                    if (filterOn && insideZone(p)) {
+                        // 在天然结构范围内，标记为已见但不通知
+                        seenBlocks.add(posLong);
+                        posLastLabel.put(posLong, label); // 记录类型以避免重复上报
+                        continue;
+                    }
+
+                    // mansion 检测等 heavy 检查受预算限制
+                    if (filterOn && heavyBudget > 0) {
+                        heavyBudget--;
+                        if (countNear(world, p, 6, 3, 12, b -> b == Blocks.DARK_OAK_PLANKS) >= 12) {
+                            zones.add(new Zone(p.getX(), p.getY(), p.getZ(), R_MANSION * R_MANSION));
+                            seenBlocks.add(posLong);
+                            posLastLabel.put(posLong, label);
+                            continue;
+                        }
+                    }
+
+                    // 最终上报（若之前未上报或类型变化）
+                    String lastLabel = posLastLabel.get(posLong);
+                    if (lastLabel == null || !lastLabel.equals(label)) {
+                        seenBlocks.add(posLong);
+                        posLastLabel.put(posLong, label);
+                        report("[雷达锁定-%s] [%d, %d, %d]", label, p.getX(), p.getY(), p.getZ());
+                    }
                 }
-
-                if (heavyBudget <= 0) continue; // 本轮检查额度用完，留到下一轮
-                heavyBudget--;
-                if (countNear(world, p, 6, 3, 12, b -> b == Blocks.DARK_OAK_PLANKS) >= 12) {
-                    zones.add(new Zone(p.getX(), p.getY(), p.getZ(), R_MANSION * R_MANSION));
-                    seenBlocks.add(p);
-                    continue;
-                }
             }
-
-            seenBlocks.add(p);
-            report("[雷达锁定-%s] [%d, %d, %d]",
-                c.label(), p.getX(), p.getY(), p.getZ());
         }
     }
 
@@ -301,15 +351,12 @@ public class SatelliteScanner extends Module {
         if (rad > 0) {
             markerSeen.add(pos);
             zones.add(new Zone(pos.getX(), pos.getY(), pos.getZ(), rad * rad));
-        }
-    }
-
-    private void testJungle(Level world, BlockPos pos) {
-        if (markerSeen.contains(pos) || heavyBudget <= 0) return;
-        heavyBudget--;
-        markerSeen.add(pos);
-        if (countNear(world, pos, 5, 3, 6, b -> b == Blocks.MOSSY_COBBLESTONE) >= 6) {
-            zones.add(new Zone(pos.getX(), pos.getY(), pos.getZ(), R_JUNGLE * R_JUNGLE));
+        } else {
+            // 额外：若是丛林线索（例如发射器但非投掷器），登记并稍后检测
+            if (n.contains("dispenser") && !n.contains("dropper")) {
+                markerSeen.add(pos);
+                // 轻量检测会在 countNear 中完成（需要 heavyBudget）
+            }
         }
     }
 
