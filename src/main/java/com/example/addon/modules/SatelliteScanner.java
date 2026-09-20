@@ -62,7 +62,7 @@ public class SatelliteScanner extends Module {
     private static final int R_DUNGEON = 10;
     private static final int R_TRIAL = 30;
     private static final int R_CITY = 30;
-    private static final int R_VILLAGE = 56;
+    private static final int R_VILLAGE = 80; // 村庄半径加大
     private static final int R_JUNGLE = 16;
     private static final int R_DESERT = 24;
     private static final int R_MANSION = 24;
@@ -76,7 +76,8 @@ public class SatelliteScanner extends Module {
     private static final int PHASE_RESOLVE = 2;
 
     private enum Kind {
-        OTHER, SHULKER, ENDER, HOPPER, DISPENSER, DROPPER, CHEST,
+        OTHER, SHULKER, ENDER, HOPPER, DISPENSER, DROPPER,
+        CHEST, BARREL, TRAPPED,
         SPAWNER, TRIAL, VAULT, SCULK, BELL
     }
 
@@ -114,7 +115,19 @@ public class SatelliteScanner extends Module {
 
     private final Setting<Boolean> chests = sgGeneral.add(new BoolSetting.Builder()
         .name("chests")
-        .description("扫描箱子/陷阱箱/木桶")
+        .description("扫描箱子")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Boolean> barrels = sgGeneral.add(new BoolSetting.Builder()
+        .name("barrels")
+        .description("扫描木桶")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Boolean> trappedChests = sgGeneral.add(new BoolSetting.Builder()
+        .name("trapped-chests")
+        .description("扫描陷阱箱")
         .defaultValue(true)
         .build());
 
@@ -171,8 +184,8 @@ public class SatelliteScanner extends Module {
 
     /* ========== 状态 ========== */
     private final java.util.Set<Integer> seenPearls = new HashSet<>();
-    private final HashSet<BlockPos> seenBlocks = new HashSet<>();      // 已报告
-    private final HashSet<BlockPos> suppressed = new HashSet<>();      // 已判为天然结构而跳过
+    private final HashSet<BlockPos> seenBlocks = new HashSet<>();
+    private final HashSet<BlockPos> suppressed = new HashSet<>();
     private final HashSet<BlockPos> queued = new HashSet<>();
     private final HashSet<BlockPos> markerSeen = new HashSet<>();
     private final HashSet<BlockPos> markSeen = new HashSet<>();
@@ -181,12 +194,12 @@ public class SatelliteScanner extends Module {
     private final HashMap<Class<?>, Kind> kindCache = new HashMap<>();
     private final HashMap<Class<?>, Boolean> pearlClassCache = new HashMap<>();
     private final ArrayList<Zone> zones = new ArrayList<>();
-    private final ArrayList<BlockPos> marks = new ArrayList<>();       // 末影箱/潜影盒位置
+    private final ArrayList<BlockPos> marks = new ArrayList<>();
     private final ArrayList<Cand> unresolved = new ArrayList<>();
     private final ArrayDeque<BlockPos> dispQueue = new ArrayDeque<>();
     private final ArrayDeque<Msg> pending = new ArrayDeque<>();
 
-    /* Qmsg 队列：qmLines 待发；qmQueued 防止重复入队；qmSent 已成功发送（整个游戏运行期间保留）；qmRetry 待重试 */
+    /* Qmsg 队列 */
     private final ArrayDeque<String> qmLines = new ArrayDeque<>();
     private final HashSet<String> qmQueued = new HashSet<>();
     private final java.util.Set<String> qmSent = ConcurrentHashMap.newKeySet();
@@ -229,7 +242,6 @@ public class SatelliteScanner extends Module {
         qmFailing = false;
         qmError = null;
         if (qmEnabled.get()) {
-            // 带上时间，保证每次启动的提示都不同，不会被"发过的不再发"挡掉
             qmLines.add("已启动 " + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
                 + "，推送正常时会收到这条消息");
         }
@@ -283,13 +295,13 @@ public class SatelliteScanner extends Module {
         scanBlocksStep(mc);
     }
 
-    /* ========== 末影珍珠 ========== */
+    /* ========== 末影珍珠：真实 512 半径，Y 全覆盖 ========== */
     private void scanPearls(Minecraft mc) {
         double r = range.get();
         double rr = r <= 0 ? MAX_RANGE : Math.min(r, MAX_RANGE);
         AABB box = new AABB(
-            mc.player.getX() - rr, mc.player.getY() - rr, mc.player.getZ() - rr,
-            mc.player.getX() + rr, mc.player.getY() + rr, mc.player.getZ() + rr
+            mc.player.getX() - rr, -64, mc.player.getZ() - rr,
+            mc.player.getX() + rr, 320, mc.player.getZ() + rr
         );
 
         Level world = mc.level;
@@ -313,11 +325,18 @@ public class SatelliteScanner extends Module {
 
     /* ========== 方块：分帧扫描 → 判断 → 报告 ========== */
     private void scanBlocksStep(Minecraft mc) {
-        if (!(shulkers.get() || chests.get() || enderChests.get() || hoppers.get() || dispensers.get())) return;
+        if (!(shulkers.get() || chests.get() || barrels.get() || trappedChests.get()
+            || enderChests.get() || hoppers.get() || dispensers.get())) return;
         Level world = mc.level;
 
-        int cfg = (shulkers.get() ? 1 : 0) | (chests.get() ? 2 : 0) | (enderChests.get() ? 4 : 0)
-            | (hoppers.get() ? 8 : 0) | (dispensers.get() ? 16 : 0) | (lockNatural.get() ? 32 : 0);
+        int cfg = (shulkers.get() ? 1 : 0)
+            | (chests.get() ? 2 : 0)
+            | (barrels.get() ? 4 : 0)
+            | (trappedChests.get() ? 8 : 0)
+            | (enderChests.get() ? 16 : 0)
+            | (hoppers.get() ? 32 : 0)
+            | (dispensers.get() ? 64 : 0)
+            | (lockNatural.get() ? 128 : 0);
         if (cfg != lastCfg) {
             resetBlockState();
             lastCfg = cfg;
@@ -371,7 +390,7 @@ public class SatelliteScanner extends Module {
 
         long key = ((long) cx << 32) ^ (cz & 0xFFFFFFFFL);
         Integer prev = chunkCount.get(key);
-        if (prev != null && prev == size) return; // 方块实体数量没变，跳过
+        if (prev != null && prev == size) return;
         chunkCount.put(key, size);
         if (size == 0) return;
 
@@ -387,7 +406,7 @@ public class SatelliteScanner extends Module {
                     if (filterOn && markSeen.add(pos)) marks.add(pos);
                     addCand(pos, k);
                 }
-                case HOPPER, DROPPER, CHEST -> addCand(pos, k);
+                case HOPPER, DROPPER, CHEST, BARREL, TRAPPED -> addCand(pos, k);
                 case DISPENSER -> {
                     if (filterOn && !markerSeen.contains(pos)) dispQueue.add(pos);
                     addCand(pos, k);
@@ -419,7 +438,7 @@ public class SatelliteScanner extends Module {
         final boolean filterOn = !lockNatural.get();
         int probes = PROBES_PER_TICK;
 
-        // 先判断丛林神殿（发射器附近有大量苔石）
+        // 丛林神庙：发射器附近大量苔石
         while (!dispQueue.isEmpty() && probes > 0) {
             BlockPos p = dispQueue.poll();
             if (!markerSeen.add(p)) continue;
@@ -443,13 +462,12 @@ public class SatelliteScanner extends Module {
             if (label != null) {
                 boolean natural = false;
 
-                // 末影箱和潜影盒不是这些天然结构里会出现的东西，始终通知
                 if (filterOn && c.kind() != Kind.SHULKER && c.kind() != Kind.ENDER) {
                     natural = insideZone(p);
                     if (!natural) {
                         long cell = cellKey(p);
                         if (!negCells.contains(cell)) {
-                            if (probes <= 0) break; // 本 tick 检查额度用完，下个 tick 继续
+                            if (probes <= 0) break;
                             probes--;
                             int rad = probeNatural(world, p);
                             if (rad > 0) {
@@ -463,7 +481,7 @@ public class SatelliteScanner extends Module {
                 }
 
                 if (natural && !markNear(p)) {
-                    suppressed.add(p); // 天然结构里的，跳过不报
+                    suppressed.add(p);
                 } else {
                     seenBlocks.add(p);
                     report("[雷达锁定-%s] [%d, %d, %d]",
@@ -481,8 +499,6 @@ public class SatelliteScanner extends Module {
     }
 
     /* ========== 天然结构判断（只用来屏蔽，不通知） ========== */
-
-    // 沙漠神殿（TNT）、林地府邸（深色橡木木板）、沉船（含水的箱子 + 木板）
     private int probeNatural(Level world, BlockPos c) {
         int tnt = 0, oak = 0, planks = 0;
         for (int dx = -6; dx <= 6; dx++) {
@@ -532,7 +548,7 @@ public class SatelliteScanner extends Module {
                 long dx = z.x() - p.getX();
                 long dy = z.y() - p.getY();
                 long dz = z.z() - p.getZ();
-                if (dx * dx + dy * dy + dz * dz <= 64) return; // 同类标记靠得很近，不重复添加
+                if (dx * dx + dy * dy + dz * dz <= 64) return;
             }
         }
         zones.add(new Zone(p.getX(), p.getY(), p.getZ(), r2));
@@ -548,7 +564,6 @@ public class SatelliteScanner extends Module {
         return false;
     }
 
-    // 周围 100 格内有末影箱/潜影盒
     private boolean markNear(BlockPos pos) {
         long lim = (long) PLAYER_MARK_RADIUS * PLAYER_MARK_RADIUS;
         for (BlockPos m : marks) {
@@ -584,9 +599,9 @@ public class SatelliteScanner extends Module {
         if (be instanceof HopperBlockEntity) return Kind.HOPPER;
         if (be instanceof DropperBlockEntity) return Kind.DROPPER;
         if (be instanceof DispenserBlockEntity) return Kind.DISPENSER;
-        if (be instanceof ChestBlockEntity || be instanceof TrappedChestBlockEntity || be instanceof BarrelBlockEntity) {
-            return Kind.CHEST;
-        }
+        if (be instanceof ChestBlockEntity) return Kind.CHEST;
+        if (be instanceof BarrelBlockEntity) return Kind.BARREL;
+        if (be instanceof TrappedChestBlockEntity) return Kind.TRAPPED;
 
         String n = be.getClass().getSimpleName().toLowerCase(Locale.ROOT);
         if (n.contains("trialspawner")) return Kind.TRIAL;
@@ -603,17 +618,18 @@ public class SatelliteScanner extends Module {
             case ENDER -> enderChests.get() ? "末影箱" : null;
             case HOPPER -> hoppers.get() ? "漏斗" : null;
             case DISPENSER, DROPPER -> dispensers.get() ? "发射器/投掷器" : null;
-            case CHEST -> chests.get() ? "储物箱/陷阱箱/木桶" : null;
+            case CHEST -> chests.get() ? "箱子" : null;
+            case BARREL -> barrels.get() ? "木桶" : null;
+            case TRAPPED -> trappedChests.get() ? "陷阱箱" : null;
             default -> null;
         };
     }
 
-    /* ========== 消息：聊天栏即时显示；QQ 排队 ========== */
+    /* ========== 消息：聊天栏即时显示；Qmsg 排队 ========== */
     private void report(String fmt, Object... args) {
         pending.add(new Msg(fmt, args));
         if (qmEnabled.get()) {
             String text = softenDigits(String.format(Locale.ROOT, fmt, args));
-            // 已发过的、已在队列里的都不再入队
             if (qmLines.size() < QM_QUEUE_LIMIT && !qmSent.contains(text) && qmQueued.add(text)) {
                 qmLines.add(text);
             }
@@ -627,7 +643,7 @@ public class SatelliteScanner extends Module {
         }
     }
 
-    // Qmsg酱会拦截"连续数字"，所以把 4 位及以上的数字加上千位分隔，例如 12345 -> 12,345
+    // Qmsg酱会拦截连续数字，4 位及以上加千位分隔
     private static String softenDigits(String s) {
         Matcher m = LONG_DIGITS.matcher(s);
         StringBuilder sb = new StringBuilder();
@@ -647,7 +663,6 @@ public class SatelliteScanner extends Module {
 
     /* ========== Qmsg酱 推送：一条一条发，多的排队，发过的不再发 ========== */
     private void flushQmsg() {
-        // 之前发送失败的，放回队列最前面等下一次重试
         String failed;
         while ((failed = qmRetry.poll()) != null) {
             if (qmQueued.add(failed)) qmLines.addFirst(failed);
@@ -665,7 +680,6 @@ public class SatelliteScanner extends Module {
             return;
         }
 
-        // 取出下一条没发过的
         String text = null;
         while (!qmLines.isEmpty()) {
             String t = qmLines.poll();
@@ -680,7 +694,6 @@ public class SatelliteScanner extends Module {
         qmCooldown = qmInterval.get() * 20;
 
         if (!postToQmsg(text)) {
-            // 配置不对，没发出去：放回队首，下个间隔再试
             qmLines.addFirst(text);
             qmQueued.add(text);
         }
@@ -745,16 +758,14 @@ public class SatelliteScanner extends Module {
             if (code == 200 && resp.replace(" ", "").contains("\"success\":true")) {
                 qmFailing = false;
                 qmRejects.remove(text);
-                markSent(text); // 提交成功，记为已发，以后不再发
+                markSent(text);
                 return;
             }
 
-            // 服务器回复了但没成功
             boolean violation = resp.contains("违规") || resp.contains("敏感") || resp.contains("禁止");
             if (violation) {
                 int n = qmRejects.merge(text, 1, Integer::sum);
                 if (n >= QM_MAX_REJECTS) {
-                    // 这条消息被判违规，反复发也没用，跳过，别卡住后面的
                     qmRejects.remove(text);
                     markSent(text);
                     qmFail("这条消息被判违规，已跳过：" + shorten(resp));
@@ -762,7 +773,7 @@ public class SatelliteScanner extends Module {
                 }
             }
             qmFail("HTTP " + code + " " + shorten(resp));
-            qmRetry.add(text); // 其他原因（限额、限流等）会一直重试，等恢复后继续发
+            qmRetry.add(text);
         } catch (Exception e) {
             qmFail(e.getClass().getSimpleName() + ": " + shorten(String.valueOf(e.getMessage())));
             qmRetry.add(text);
