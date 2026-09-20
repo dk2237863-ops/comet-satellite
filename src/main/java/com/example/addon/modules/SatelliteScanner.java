@@ -26,20 +26,26 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Predicate;
 
 public class SatelliteScanner extends Module {
     private static final int MAX_MESSAGES_PER_TICK = 10;
-    private static final int CQ_LINES_PER_MESSAGE = 15;
-    private static final int CQ_FLUSH_TICKS = 20;
-    private static final int CQ_QUEUE_LIMIT = 2000;
+
+    /* QQ 推送：每 15 秒一条，多的先排队；发过的不再发 */
+    private static final int CQ_INTERVAL_TICKS = 300;
+    private static final int CQ_QUEUE_LIMIT = 5000;
+    private static final int CQ_SENT_LIMIT = 50000;
 
     /* 性能相关 */
     private static final int MAX_RANGE = 512;
@@ -130,7 +136,7 @@ public class SatelliteScanner extends Module {
     /* ========== QQ 推送设置 ========== */
     private final Setting<Boolean> cqEnabled = sgCq.add(new BoolSetting.Builder()
         .name("cq-enabled")
-        .description("把扫描结果通过 go-cqhttp 推送到 QQ")
+        .description("把扫描结果通过 go-cqhttp 推送到 QQ（每15秒一条，发过的不再发）")
         .defaultValue(false)
         .build());
 
@@ -168,10 +174,15 @@ public class SatelliteScanner extends Module {
     private final ArrayList<Cand> unresolved = new ArrayList<>();
     private final ArrayDeque<BlockPos> dispQueue = new ArrayDeque<>();
     private final ArrayDeque<Msg> pending = new ArrayDeque<>();
+
+    /* QQ 队列：cqLines 待发；cqQueued 防止重复入队；cqSent 已成功发送（整个游戏运行期间保留）；cqRetry 发送失败待重试 */
     private final ArrayDeque<String> cqLines = new ArrayDeque<>();
+    private final HashSet<String> cqQueued = new HashSet<>();
+    private final java.util.Set<String> cqSent = ConcurrentHashMap.newKeySet();
+    private final ConcurrentLinkedQueue<String> cqRetry = new ConcurrentLinkedQueue<>();
+    private int cqCooldown = 0;
 
     private int pearlTimer = 0;
-    private int cqTimer = 0;
     private int phase = PHASE_WAIT;
     private int waitTicks = 0;
     private int lastCfg = -1;
@@ -197,17 +208,24 @@ public class SatelliteScanner extends Module {
         resetBlockState();
         pending.clear();
         cqLines.clear();
+        cqQueued.clear();
+        cqRetry.clear();
+        cqCooldown = 0;
         pearlTimer = 0;
-        cqTimer = 0;
         lastCfg = -1;
         cqFailing = false;
         cqError = null;
-        if (cqEnabled.get()) cqLines.add("已启动，推送正常时会收到这条消息");
+        if (cqEnabled.get()) {
+            // 带上时间，保证每次启动的提示都不同，不会被"发过的不再发"挡掉
+            cqLines.add("已启动 " + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                + "，推送正常时会收到这条消息");
+        }
     }
 
     @Override
     public void onDeactivate() {
         cqLines.clear();
+        cqQueued.clear();
         if (cqExecutor != null) {
             cqExecutor.shutdown();
             cqExecutor = null;
@@ -577,11 +595,15 @@ public class SatelliteScanner extends Module {
         };
     }
 
-    /* ========== 消息：聊天栏排队 + QQ 排队 ========== */
+    /* ========== 消息：聊天栏即时显示；QQ 排队 ========== */
     private void report(String fmt, Object... args) {
         pending.add(new Msg(fmt, args));
-        if (cqEnabled.get() && cqLines.size() < CQ_QUEUE_LIMIT) {
-            cqLines.add(String.format(Locale.ROOT, fmt, args));
+        if (cqEnabled.get()) {
+            String text = String.format(Locale.ROOT, fmt, args);
+            // 已发过的、已在队列里的都不再入队
+            if (cqLines.size() < CQ_QUEUE_LIMIT && !cqSent.contains(text) && cqQueued.add(text)) {
+                cqLines.add(text);
+            }
         }
     }
 
@@ -592,37 +614,59 @@ public class SatelliteScanner extends Module {
         }
     }
 
-    /* ========== QQ 推送 ========== */
+    /* ========== QQ 推送：每 15 秒一条，多的排队，发过的不再发 ========== */
     private void flushCq() {
+        // 之前发送失败的，放回队列最前面等下一次重试
+        String failed;
+        while ((failed = cqRetry.poll()) != null) {
+            if (cqQueued.add(failed)) cqLines.addFirst(failed);
+        }
+
+        if (cqCooldown > 0) {
+            cqCooldown--;
+            return;
+        }
         if (cqLines.isEmpty()) return;
-        if (++cqTimer < CQ_FLUSH_TICKS) return;
-        cqTimer = 0;
 
         if (!cqEnabled.get()) {
             cqLines.clear();
+            cqQueued.clear();
             return;
         }
 
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < CQ_LINES_PER_MESSAGE && !cqLines.isEmpty(); i++) {
-            if (i > 0) sb.append('\n');
-            sb.append(cqLines.poll());
+        // 取出下一条没发过的
+        String text = null;
+        while (!cqLines.isEmpty()) {
+            String t = cqLines.poll();
+            cqQueued.remove(t);
+            if (!cqSent.contains(t)) {
+                text = t;
+                break;
+            }
         }
-        postToCq(sb.toString());
+        if (text == null) return;
+
+        cqCooldown = CQ_INTERVAL_TICKS;
+
+        if (!postToCq(text)) {
+            // 配置不对，没发出去：放回队首，15 秒后再试
+            cqLines.addFirst(text);
+            cqQueued.add(text);
+        }
     }
 
-    private void postToCq(String text) {
+    private boolean postToCq(String text) {
         String base = cqUrl.get().trim();
         String uid = cqUserId.get().trim();
         String token = cqToken.get().trim();
 
         if (!(base.startsWith("http://") || base.startsWith("https://"))) {
             cqFail("cq-url 必须以 http:// 或 https:// 开头");
-            return;
+            return false;
         }
         if (!uid.matches("\\d{5,12}")) {
             cqFail("cq-user-id 应为 5 到 12 位数字的 QQ 号");
-            return;
+            return false;
         }
         while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
 
@@ -637,10 +681,11 @@ public class SatelliteScanner extends Module {
                 return t;
             });
         }
-        cqExecutor.execute(() -> sendHttp(endpoint, token, body));
+        cqExecutor.execute(() -> sendHttp(endpoint, token, body, text));
+        return true;
     }
 
-    private void sendHttp(String endpoint, String token, String body) {
+    private void sendHttp(String endpoint, String token, String body, String text) {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) URI.create(endpoint).toURL().openConnection();
@@ -661,11 +706,15 @@ public class SatelliteScanner extends Module {
 
             if (code == 200 && resp.replace(" ", "").contains("\"retcode\":0")) {
                 cqFailing = false;
+                if (cqSent.size() > CQ_SENT_LIMIT) cqSent.clear();
+                cqSent.add(text); // 发送成功，记为已发，以后不再发
             } else {
                 cqFail("HTTP " + code + " " + shorten(resp));
+                cqRetry.add(text);
             }
         } catch (Exception e) {
             cqFail(e.getClass().getSimpleName() + ": " + shorten(String.valueOf(e.getMessage())));
+            cqRetry.add(text);
         } finally {
             if (conn != null) conn.disconnect();
         }
