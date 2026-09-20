@@ -4,7 +4,6 @@ import com.example.addon.AddonTemplate;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
@@ -21,7 +20,6 @@ import net.minecraft.world.level.block.entity.EnderChestBlockEntity;
 import net.minecraft.world.level.block.entity.HopperBlockEntity;
 import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
 import net.minecraft.world.level.block.entity.TrappedChestBlockEntity;
-import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.AABB;
 
 import java.io.OutputStream;
@@ -33,49 +31,63 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Predicate;
 
-/**
- * 单次遍历即可完成全部功能的 SatelliteScanner
- * - 按区块逐区块处理：在同一区块内先收集 marker（天然结构线索）与候选储物方块，
- *   然后在该区块内完成天然结构过滤与上报（避免全局两遍扫描）。
- * - 保留 QQ 推送、聊天排队、天然结构识别、重度检测预算、不重复播报等功能。
- */
 public class SatelliteScanner extends Module {
     private static final int MAX_MESSAGES_PER_TICK = 10;
     private static final int CQ_LINES_PER_MESSAGE = 15;
     private static final int CQ_FLUSH_TICKS = 20;
     private static final int CQ_QUEUE_LIMIT = 2000;
 
-    private static final int HEAVY_BUDGET_PER_SCAN = 30;
+    /* 性能相关 */
+    private static final int MAX_RANGE = 512;
+    private static final int CHUNKS_PER_TICK = 256;
+    private static final int SWEEP_GAP_TICKS = 10;
+    private static final int PROBES_PER_TICK = 12;
+    private static final int DECISIONS_PER_TICK = 500;
+    private static final int CACHE_RESET_SWEEPS = 60;
 
+    /* 天然结构屏蔽半径（格） */
     private static final int R_DUNGEON = 10;
-    private static final int R_TRIAL = 20;
-    private static final int R_CITY = 20;
+    private static final int R_TRIAL = 30;
+    private static final int R_CITY = 30;
+    private static final int R_VILLAGE = 56;
     private static final int R_JUNGLE = 16;
+    private static final int R_DESERT = 24;
     private static final int R_MANSION = 24;
+    private static final int R_SHIP = 14;
+
+    /* 天然结构里如果这个范围内有末影箱/潜影盒，就必须通知 */
+    private static final int PLAYER_MARK_RADIUS = 100;
+
+    private static final int PHASE_WAIT = 0;
+    private static final int PHASE_SWEEP = 1;
+    private static final int PHASE_RESOLVE = 2;
+
+    private enum Kind {
+        OTHER, SHULKER, ENDER, HOPPER, DISPENSER, DROPPER, CHEST,
+        SPAWNER, TRIAL, VAULT, SCULK, BELL
+    }
 
     private record Msg(String fmt, Object[] args) {}
     private record Zone(int x, int y, int z, int r2) {}
-    private record Cand(BlockPos pos, String label) {}
+    private record Cand(BlockPos pos, Kind kind) {}
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgCq = settings.createGroup("QQ推送");
 
     private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
         .name("range")
-        .description("扫描半径（0为全局）")
+        .description("扫描半径，0 或超过 512 都按 512 算")
         .defaultValue(0.0)
         .min(0.0)
         .build());
 
     private final Setting<Boolean> lockNatural = sgGeneral.add(new BoolSetting.Builder()
         .name("lock-natural-structures")
-        .description("开：天然结构（地牢/试炼密室/远古城市/丛林神殿/林地府邸）里的方块也锁定通知；关：跳过它们")
+        .description("开：天然结构里的方块也锁定通知；关：跳过它们（末影箱/潜影盒100格内除外）")
         .defaultValue(false)
         .build());
 
@@ -140,17 +152,31 @@ public class SatelliteScanner extends Module {
         .defaultValue("")
         .build());
 
-    private final Set<Integer> seenPearls = new HashSet<>();
-    private final Set<Long> seenBlocks = new HashSet<>(); // pos.asLong()
-    private final Set<BlockPos> markerSeen = new HashSet<>();
+    /* ========== 状态 ========== */
+    private final java.util.Set<Integer> seenPearls = new HashSet<>();
+    private final HashSet<BlockPos> seenBlocks = new HashSet<>();      // 已报告
+    private final HashSet<BlockPos> suppressed = new HashSet<>();      // 已判为天然结构而跳过
+    private final HashSet<BlockPos> queued = new HashSet<>();
+    private final HashSet<BlockPos> markerSeen = new HashSet<>();
+    private final HashSet<BlockPos> markSeen = new HashSet<>();
+    private final HashSet<Long> negCells = new HashSet<>();
+    private final HashMap<Long, Integer> chunkCount = new HashMap<>();
+    private final HashMap<Class<?>, Kind> kindCache = new HashMap<>();
+    private final HashMap<Class<?>, Boolean> pearlClassCache = new HashMap<>();
     private final ArrayList<Zone> zones = new ArrayList<>();
-    private final ArrayList<Cand> cands = new ArrayList<>();
+    private final ArrayList<BlockPos> marks = new ArrayList<>();       // 末影箱/潜影盒位置
+    private final ArrayList<Cand> unresolved = new ArrayList<>();
+    private final ArrayDeque<BlockPos> dispQueue = new ArrayDeque<>();
     private final ArrayDeque<Msg> pending = new ArrayDeque<>();
     private final ArrayDeque<String> cqLines = new ArrayDeque<>();
-    private final HashMap<Long, String> posLastLabel = new HashMap<>(); // posLong -> lastLabel (避免重复播报)
-    private int tickTimer = 0;
+
+    private int pearlTimer = 0;
     private int cqTimer = 0;
-    private int heavyBudget = 0;
+    private int phase = PHASE_WAIT;
+    private int waitTicks = 0;
+    private int lastCfg = -1;
+    private int sweepCount = 0;
+    private int sweepCx0, sweepCz0, sweepW, sweepIdx, sweepTotal;
 
     private ExecutorService cqExecutor;
     private volatile boolean cqFailing = false;
@@ -168,14 +194,12 @@ public class SatelliteScanner extends Module {
     public void onActivate() {
         seenPearls.clear();
         seenBlocks.clear();
-        markerSeen.clear();
-        zones.clear();
-        cands.clear();
+        resetBlockState();
         pending.clear();
         cqLines.clear();
-        posLastLabel.clear();
-        tickTimer = 0;
+        pearlTimer = 0;
         cqTimer = 0;
+        lastCfg = -1;
         cqFailing = false;
         cqError = null;
         if (cqEnabled.get()) cqLines.add("已启动，推送正常时会收到这条消息");
@@ -188,6 +212,22 @@ public class SatelliteScanner extends Module {
             cqExecutor.shutdown();
             cqExecutor = null;
         }
+    }
+
+    private void resetBlockState() {
+        suppressed.clear();
+        queued.clear();
+        markerSeen.clear();
+        markSeen.clear();
+        negCells.clear();
+        chunkCount.clear();
+        zones.clear();
+        marks.clear();
+        unresolved.clear();
+        dispQueue.clear();
+        phase = PHASE_WAIT;
+        waitTicks = 0;
+        sweepCount = 0;
     }
 
     @EventHandler
@@ -204,170 +244,240 @@ public class SatelliteScanner extends Module {
             info("[QQ推送] 发送失败：%s", err);
         }
 
-        if (++tickTimer < 10) return;
-        tickTimer = 0;
-
-        heavyBudget = HEAVY_BUDGET_PER_SCAN;
-
-        double r = range.get();
-        AABB box = r <= 0
-            ? new AABB(-3E7, -512, -3E7, 3E7, 512, 3E7)
-            : new AABB(
-                mc.player.getX() - r, mc.player.getY() - r, mc.player.getZ() - r,
-                mc.player.getX() + r, mc.player.getY() + r, mc.player.getZ() + r
-            );
-
-        Level world = mc.level;
-
-        /* ========== 末影珍珠 ========== */
-        if (pearls.get()) {
-            for (Entity e : world.getEntitiesOfClass(Entity.class, box, ent -> ent.getClass().getSimpleName().toLowerCase(Locale.ROOT).contains("enderpearl"))) {
-                int id = e.getId();
-                if (seenPearls.add(id)) {
-                    report("[雷达锁定-末影珍珠] X %.2f / Y %.2f / Z %.2f",
-                        e.getX(), e.getY(), e.getZ());
-                }
-            }
+        if (++pearlTimer >= 10) {
+            pearlTimer = 0;
+            if (pearls.get()) scanPearls(mc);
         }
 
-        /* ========== 方块：按区块逐区块单次处理（在区块内先收集 marker 与候选，再在区块内完成过滤与上报） ========== */
-        boolean scanBlocks =
-            shulkers.get() || chests.get() || enderChests.get() || hoppers.get() || dispensers.get();
-        if (!scanBlocks) return;
+        scanBlocksStep(mc);
+    }
+
+    /* ========== 末影珍珠 ========== */
+    private void scanPearls(Minecraft mc) {
+        double r = range.get();
+        double rr = r <= 0 ? MAX_RANGE : Math.min(r, MAX_RANGE);
+        AABB box = new AABB(
+            mc.player.getX() - rr, mc.player.getY() - rr, mc.player.getZ() - rr,
+            mc.player.getX() + rr, mc.player.getY() + rr, mc.player.getZ() + rr
+        );
+
+        Level world = mc.level;
+        for (Entity e : world.getEntitiesOfClass(Entity.class, box, ent -> isPearlClass(ent.getClass()))) {
+            int id = e.getId();
+            if (seenPearls.add(id)) {
+                report("[雷达锁定-末影珍珠] X %.2f / Y %.2f / Z %.2f",
+                    e.getX(), e.getY(), e.getZ());
+            }
+        }
+    }
+
+    private boolean isPearlClass(Class<?> c) {
+        Boolean b = pearlClassCache.get(c);
+        if (b == null) {
+            b = c.getSimpleName().toLowerCase(Locale.ROOT).contains("enderpearl");
+            pearlClassCache.put(c, b);
+        }
+        return b;
+    }
+
+    /* ========== 方块：分帧扫描 → 判断 → 报告 ========== */
+    private void scanBlocksStep(Minecraft mc) {
+        if (!(shulkers.get() || chests.get() || enderChests.get() || hoppers.get() || dispensers.get())) return;
+        Level world = mc.level;
+
+        int cfg = (shulkers.get() ? 1 : 0) | (chests.get() ? 2 : 0) | (enderChests.get() ? 4 : 0)
+            | (hoppers.get() ? 8 : 0) | (dispensers.get() ? 16 : 0) | (lockNatural.get() ? 32 : 0);
+        if (cfg != lastCfg) {
+            resetBlockState();
+            lastCfg = cfg;
+        }
+
+        switch (phase) {
+            case PHASE_WAIT -> {
+                if (++waitTicks >= SWEEP_GAP_TICKS) startSweep(mc);
+            }
+            case PHASE_SWEEP -> sweepStep(world);
+            default -> resolveStep(world);
+        }
+    }
+
+    private void startSweep(Minecraft mc) {
+        double r = range.get();
+        int radius = r <= 0 ? MAX_RANGE : (int) Math.min(r, MAX_RANGE);
+        int rc = (radius + 15) >> 4;
+        BlockPos c = mc.player.blockPosition();
+
+        sweepCx0 = (c.getX() >> 4) - rc;
+        sweepCz0 = (c.getZ() >> 4) - rc;
+        sweepW = 2 * rc + 1;
+        sweepTotal = sweepW * sweepW;
+        sweepIdx = 0;
+
+        if (++sweepCount >= CACHE_RESET_SWEEPS) {
+            sweepCount = 0;
+            chunkCount.clear();
+            negCells.clear();
+        }
+        phase = PHASE_SWEEP;
+    }
+
+    private void sweepStep(Level world) {
+        int n = 0;
+        while (n < CHUNKS_PER_TICK && sweepIdx < sweepTotal) {
+            int cx = sweepCx0 + sweepIdx % sweepW;
+            int cz = sweepCz0 + sweepIdx / sweepW;
+            sweepIdx++;
+            n++;
+            scanChunk(world, cx, cz);
+        }
+        if (sweepIdx >= sweepTotal) phase = PHASE_RESOLVE;
+    }
+
+    private void scanChunk(Level world, int cx, int cz) {
+        var chunk = world.getChunk(cx, cz);
+        var map = chunk.getBlockEntities();
+        int size = map.size();
+
+        long key = ((long) cx << 32) ^ (cz & 0xFFFFFFFFL);
+        Integer prev = chunkCount.get(key);
+        if (prev != null && prev == size) return; // 方块实体数量没变，跳过
+        chunkCount.put(key, size);
+        if (size == 0) return;
 
         final boolean filterOn = !lockNatural.get();
 
-        int radius = r <= 0 ? 80 : (int) Math.max(1, Math.ceil(r));
-        BlockPos center = mc.player.blockPosition();
+        for (BlockEntity be : map.values()) {
+            Kind k = kindOf(be);
+            if (k == Kind.OTHER) continue;
+            BlockPos pos = be.getBlockPos();
 
-        int cxMin = (center.getX() - radius) >> 4;
-        int cxMax = (center.getX() + radius) >> 4;
-        int czMin = (center.getZ() - radius) >> 4;
-        int czMax = (center.getZ() + radius) >> 4;
-
-        // 懒清理：移除已不存在的记录，避免永久屏蔽
-        cands.clear();
-        // 遍历区块：对每个区块先做一次内部扫描（收集 marker 与候选），然后在该区块内完成过滤与上报
-        for (int cx = cxMin; cx <= cxMax; cx++) {
-            for (int cz = czMin; cz <= czMax; cz++) {
-                LevelChunk chunk;
-                try {
-                    // 尝试获取区块（注意：不同映射可能需要替换为 getChunkIfLoaded）
-                    chunk = world.getChunk(cx, cz);
-                } catch (Throwable t) {
-                    // 若映射不同或方法会强制加载，可尝试反射 getChunkIfLoaded（兼容性保底）
-                    try {
-                        chunk = (LevelChunk) world.getClass()
-                            .getMethod("getChunkIfLoaded", int.class, int.class)
-                            .invoke(world, cx, cz);
-                    } catch (Throwable ignored) {
-                        // 最后回退（可能会加载区块）
-                        try {
-                            chunk = world.getChunk(cx, cz);
-                        } catch (Throwable ex) {
-                            chunk = null;
-                        }
-                    }
+            switch (k) {
+                case SHULKER, ENDER -> {
+                    if (filterOn && markSeen.add(pos)) marks.add(pos);
+                    addCand(pos, k);
                 }
-                if (chunk == null) continue;
-
-                // 本区块内临时候选列表
-                cands.clear();
-
-                // 第一遍（区块内）：收集 marker（天然结构线索）并收集候选储物方块（未上报过）
-                for (BlockEntity be : chunk.getBlockEntities().values()) {
-                    BlockPos pos = be.getBlockPos();
-                    if (Math.abs(pos.getX() - center.getX()) > radius) continue;
-                    if (Math.abs(pos.getY() - center.getY()) > radius) continue;
-                    if (Math.abs(pos.getZ() - center.getZ()) > radius) continue;
-
-                    // 若是非目标方块且需要过滤天然结构，则登记 marker 线索
-                    String label = match(be);
-                    if (label != null) {
-                        long posLong = pos.asLong();
-                        if (!posLastLabel.containsKey(posLong)) {
-                            cands.add(new Cand(pos, label));
-                        } else {
-                            // 已上报过同位置，若类型变化则也加入候选以便更新
-                            String last = posLastLabel.get(posLong);
-                            if (!label.equals(last)) cands.add(new Cand(pos, label));
-                        }
-                    } else if (filterOn) {
-                        // 仅当需要过滤天然结构时才登记 marker
-                        addMarkerZone(be, pos);
-                    }
+                case HOPPER, DROPPER, CHEST -> addCand(pos, k);
+                case DISPENSER -> {
+                    if (filterOn && !markerSeen.contains(pos)) dispQueue.add(pos);
+                    addCand(pos, k);
                 }
-
-                // 第二步（区块内）：对本区块的候选进行天然结构过滤与上报（heavy 检查受 heavyBudget 限制）
-                for (Cand c : cands) {
-                    BlockPos p = c.pos();
-                    String label = c.label();
-                    long posLong = p.asLong();
-
-                    if (filterOn && insideZone(p)) {
-                        // 在天然结构范围内，标记为已见但不通知
-                        seenBlocks.add(posLong);
-                        posLastLabel.put(posLong, label); // 记录类型以避免重复上报
-                        continue;
-                    }
-
-                    // mansion 检测等 heavy 检查受预算限制
-                    if (filterOn && heavyBudget > 0) {
-                        heavyBudget--;
-                        if (countNear(world, p, 6, 3, 12, b -> b == Blocks.DARK_OAK_PLANKS) >= 12) {
-                            zones.add(new Zone(p.getX(), p.getY(), p.getZ(), R_MANSION * R_MANSION));
-                            seenBlocks.add(posLong);
-                            posLastLabel.put(posLong, label);
-                            continue;
-                        }
-                    }
-
-                    // 最终上报（若之前未上报或类型变化）
-                    String lastLabel = posLastLabel.get(posLong);
-                    if (lastLabel == null || !lastLabel.equals(label)) {
-                        seenBlocks.add(posLong);
-                        posLastLabel.put(posLong, label);
-                        report("[雷达锁定-%s] [%d, %d, %d]", label, p.getX(), p.getY(), p.getZ());
-                    }
+                case SPAWNER -> {
+                    if (filterOn && markerSeen.add(pos)) addZone(pos, R_DUNGEON);
                 }
+                case TRIAL, VAULT -> {
+                    if (filterOn && markerSeen.add(pos)) addZone(pos, R_TRIAL);
+                }
+                case SCULK -> {
+                    if (filterOn && markerSeen.add(pos)) addZone(pos, R_CITY);
+                }
+                case BELL -> {
+                    if (filterOn && markerSeen.add(pos)) addZone(pos, R_VILLAGE);
+                }
+                default -> { }
             }
         }
     }
 
-    /* ========== 天然结构识别（只用来屏蔽，不通知） ========== */
-    private void addMarkerZone(BlockEntity be, BlockPos pos) {
-        if (markerSeen.contains(pos)) return;
-        String n = be.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+    private void addCand(BlockPos pos, Kind k) {
+        if (labelOf(k) == null) return;
+        if (seenBlocks.contains(pos) || suppressed.contains(pos)) return;
+        if (queued.add(pos)) unresolved.add(new Cand(pos, k));
+    }
 
-        int rad = 0;
-        if (n.contains("trialspawner") || n.contains("vault")) {
-            rad = R_TRIAL;          // 试炼密室
-        } else if (n.endsWith("spawnerblockentity") && !n.contains("trial")) {
-            rad = R_DUNGEON;        // 地牢（普通刷怪笼）
-        } else if (n.contains("sculksensor")) {
-            rad = R_CITY;           // 远古城市（幽匿感测体）
+    private void resolveStep(Level world) {
+        final boolean filterOn = !lockNatural.get();
+        int probes = PROBES_PER_TICK;
+
+        // 先判断丛林神殿（发射器附近有大量苔石）
+        while (!dispQueue.isEmpty() && probes > 0) {
+            BlockPos p = dispQueue.poll();
+            if (!markerSeen.add(p)) continue;
+            probes--;
+            if (countNear(world, p, 5, 3, 6, b -> b == Blocks.MOSSY_COBBLESTONE) >= 6) {
+                addZone(p, R_JUNGLE);
+            }
+        }
+        if (!dispQueue.isEmpty()) return;
+
+        int decisions = 0;
+        int done = 0;
+        int n = unresolved.size();
+        for (; done < n; done++) {
+            if (decisions++ >= DECISIONS_PER_TICK) break;
+
+            Cand c = unresolved.get(done);
+            BlockPos p = c.pos();
+            String label = labelOf(c.kind());
+
+            if (label != null) {
+                boolean natural = false;
+
+                // 末影箱和潜影盒不是这些天然结构里会出现的东西，始终通知
+                if (filterOn && c.kind() != Kind.SHULKER && c.kind() != Kind.ENDER) {
+                    natural = insideZone(p);
+                    if (!natural) {
+                        long cell = cellKey(p);
+                        if (!negCells.contains(cell)) {
+                            if (probes <= 0) break; // 本 tick 检查额度用完，下个 tick 继续
+                            probes--;
+                            int rad = probeNatural(world, p);
+                            if (rad > 0) {
+                                addZone(p, rad);
+                                natural = true;
+                            } else {
+                                negCells.add(cell);
+                            }
+                        }
+                    }
+                }
+
+                if (natural && !markNear(p)) {
+                    suppressed.add(p); // 天然结构里的，跳过不报
+                } else {
+                    seenBlocks.add(p);
+                    report("[雷达锁定-%s] [%d, %d, %d]",
+                        label, p.getX(), p.getY(), p.getZ());
+                }
+            }
+            queued.remove(p);
         }
 
-        if (rad > 0) {
-            markerSeen.add(pos);
-            zones.add(new Zone(pos.getX(), pos.getY(), pos.getZ(), rad * rad));
-        } else {
-            // 额外：若是丛林线索（例如发射器但非投掷器），登记并稍后检测
-            if (n.contains("dispenser") && !n.contains("dropper")) {
-                markerSeen.add(pos);
-                // 轻量检测会在 countNear 中完成（需要 heavyBudget）
-            }
+        if (done > 0) unresolved.subList(0, done).clear();
+        if (unresolved.isEmpty()) {
+            phase = PHASE_WAIT;
+            waitTicks = 0;
         }
     }
 
-    private boolean insideZone(BlockPos pos) {
-        for (Zone z : zones) {
-            long dx = z.x() - pos.getX();
-            long dy = z.y() - pos.getY();
-            long dz = z.z() - pos.getZ();
-            if (dx * dx + dy * dy + dz * dz <= z.r2()) return true;
+    /* ========== 天然结构判断（只用来屏蔽，不通知） ========== */
+
+    // 沙漠神殿（TNT）、林地府邸（深色橡木木板）、沉船（含水的箱子 + 木板）
+    private int probeNatural(Level world, BlockPos c) {
+        int tnt = 0, oak = 0, planks = 0;
+        for (int dx = -6; dx <= 6; dx++) {
+            for (int dy = -4; dy <= 4; dy++) {
+                for (int dz = -6; dz <= 6; dz++) {
+                    Block b = world.getBlockState(c.offset(dx, dy, dz)).getBlock();
+                    if (b == Blocks.TNT) {
+                        tnt++;
+                    } else if (b == Blocks.DARK_OAK_PLANKS) {
+                        oak++;
+                        planks++;
+                    } else if (isPlanks(b)) {
+                        planks++;
+                    }
+                }
+            }
         }
-        return false;
+        if (tnt >= 4) return R_DESERT;
+        if (oak >= 12) return R_MANSION;
+        if (planks >= 6 && !world.getFluidState(c).isEmpty()) return R_SHIP;
+        return 0;
+    }
+
+    private static boolean isPlanks(Block b) {
+        return b == Blocks.OAK_PLANKS || b == Blocks.SPRUCE_PLANKS || b == Blocks.BIRCH_PLANKS
+            || b == Blocks.JUNGLE_PLANKS || b == Blocks.ACACIA_PLANKS || b == Blocks.DARK_OAK_PLANKS;
     }
 
     private static int countNear(Level world, BlockPos c, int rh, int rv, int needed, Predicate<Block> match) {
@@ -382,6 +492,89 @@ public class SatelliteScanner extends Module {
             }
         }
         return count;
+    }
+
+    private void addZone(BlockPos p, int rad) {
+        int r2 = rad * rad;
+        for (Zone z : zones) {
+            if (z.r2() == r2) {
+                long dx = z.x() - p.getX();
+                long dy = z.y() - p.getY();
+                long dz = z.z() - p.getZ();
+                if (dx * dx + dy * dy + dz * dz <= 64) return; // 同类标记靠得很近，不重复添加
+            }
+        }
+        zones.add(new Zone(p.getX(), p.getY(), p.getZ(), r2));
+    }
+
+    private boolean insideZone(BlockPos pos) {
+        for (Zone z : zones) {
+            long dx = z.x() - pos.getX();
+            long dy = z.y() - pos.getY();
+            long dz = z.z() - pos.getZ();
+            if (dx * dx + dy * dy + dz * dz <= z.r2()) return true;
+        }
+        return false;
+    }
+
+    // 周围 100 格内有末影箱/潜影盒
+    private boolean markNear(BlockPos pos) {
+        long lim = (long) PLAYER_MARK_RADIUS * PLAYER_MARK_RADIUS;
+        for (BlockPos m : marks) {
+            long dx = m.getX() - pos.getX();
+            long dy = m.getY() - pos.getY();
+            long dz = m.getZ() - pos.getZ();
+            if (dx * dx + dy * dy + dz * dz <= lim) return true;
+        }
+        return false;
+    }
+
+    private static long cellKey(BlockPos p) {
+        long x = p.getX() >> 3;
+        long y = p.getY() >> 3;
+        long z = p.getZ() >> 3;
+        return ((x & 0x3FFFFFFL) << 38) | ((z & 0x3FFFFFFL) << 12) | (y & 0xFFFL);
+    }
+
+    /* ========== 方块实体分类（按类缓存，只判断一次） ========== */
+    private Kind kindOf(BlockEntity be) {
+        Class<?> c = be.getClass();
+        Kind k = kindCache.get(c);
+        if (k == null) {
+            k = classify(be);
+            kindCache.put(c, k);
+        }
+        return k;
+    }
+
+    private Kind classify(BlockEntity be) {
+        if (be instanceof ShulkerBoxBlockEntity) return Kind.SHULKER;
+        if (be instanceof EnderChestBlockEntity) return Kind.ENDER;
+        if (be instanceof HopperBlockEntity) return Kind.HOPPER;
+        if (be instanceof DropperBlockEntity) return Kind.DROPPER;
+        if (be instanceof DispenserBlockEntity) return Kind.DISPENSER;
+        if (be instanceof ChestBlockEntity || be instanceof TrappedChestBlockEntity || be instanceof BarrelBlockEntity) {
+            return Kind.CHEST;
+        }
+
+        String n = be.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+        if (n.contains("trialspawner")) return Kind.TRIAL;
+        if (n.contains("vault")) return Kind.VAULT;
+        if (n.endsWith("spawnerblockentity")) return Kind.SPAWNER;
+        if (n.contains("sculksensor") || n.contains("sculkshrieker") || n.contains("sculkcatalyst")) return Kind.SCULK;
+        if (n.contains("bell")) return Kind.BELL;
+        return Kind.OTHER;
+    }
+
+    private String labelOf(Kind k) {
+        return switch (k) {
+            case SHULKER -> shulkers.get() ? "潜影盒" : null;
+            case ENDER -> enderChests.get() ? "末影箱" : null;
+            case HOPPER -> hoppers.get() ? "漏斗" : null;
+            case DISPENSER, DROPPER -> dispensers.get() ? "发射器/投掷器" : null;
+            case CHEST -> chests.get() ? "储物箱/陷阱箱/木桶" : null;
+            default -> null;
+        };
     }
 
     /* ========== 消息：聊天栏排队 + QQ 排队 ========== */
@@ -506,14 +699,5 @@ public class SatelliteScanner extends Module {
             }
         }
         return sb.toString();
-    }
-
-    private String match(BlockEntity be) {
-        if (be instanceof ShulkerBoxBlockEntity)   return shulkers.get()    ? "潜影盒" : null;
-        if (be instanceof EnderChestBlockEntity)  return enderChests.get() ? "末影箱" : null;
-        if (be instanceof HopperBlockEntity)      return hoppers.get()     ? "漏斗" : null;
-        if (be instanceof DispenserBlockEntity || be instanceof DropperBlockEntity)     return dispensers.get()  ? "发射器/投掷器" : null;
-        if (be instanceof ChestBlockEntity || be instanceof TrappedChestBlockEntity || be instanceof BarrelBlockEntity)      return chests.get()      ? "储物箱/陷阱箱/木桶" : null;
-        return null;
     }
 }
