@@ -236,8 +236,24 @@ public class SatelliteScanner extends Module {
     /* ========== 区域自动扫描（鞘翅） ========== */
     private final Setting<Integer> cruiseAltitude = sgAuto.add(new IntSetting.Builder()
         .name("cruise-altitude")
-        .description("巡航高度 Y。主世界建筑上限是 320，330 在建筑上限之上，不会撞地形。扫描读的是整列区块，一直到基岩层")
+        .description("固定高度巡航时用的 Y。开启 low-altitude-terrain-follow 后这个值不再生效")
         .defaultValue(330).min(150).max(1000).build());
+
+    private final Setting<Boolean> lowFlight = sgAuto.add(new BoolSetting.Builder()
+        .name("low-altitude-terrain-follow")
+        .description("开：不再固定高度巡航，改为贴着地形低飞，前方地形升高会提前爬升。基于地形采样，不是真正的碰撞检测，遇到陡崖/尖塔可能反应不及，请配合足够大的 hover-height / climb-lookahead")
+        .defaultValue(false)
+        .build());
+
+    private final Setting<Integer> hoverHeight = sgAuto.add(new IntSetting.Builder()
+        .name("hover-height")
+        .description("低飞模式下，目标高度 = 前方看到的最高地形 + 这个值。飞得快就调大一点，留够反应余量")
+        .defaultValue(30).min(8).max(120).build());
+
+    private final Setting<Integer> climbLookahead = sgAuto.add(new IntSetting.Builder()
+        .name("climb-lookahead")
+        .description("低飞模式下往前看多远（格）来判断要不要提前爬升。越大越安全，但飞行轨迹会更早被远处的山影响，显得没那么贴地")
+        .defaultValue(64).min(16).max(256).build());
 
     private final Setting<Integer> laneSpacing = sgAuto.add(new IntSetting.Builder()
         .name("lane-spacing")
@@ -251,7 +267,7 @@ public class SatelliteScanner extends Module {
 
     private final Setting<Integer> landBelow = sgAuto.add(new IntSetting.Builder()
         .name("land-below-durability")
-        .description("鞘翅剩余耐久低于这个值就降落修补。从330格降下来要几十秒，每秒掉1点，别设太低")
+        .description("鞘翅剩余耐久低于这个值就降落修补。从高空降下来要几十秒，每秒掉1点，别设太低")
         .defaultValue(80).min(40).max(300).build());
 
     private final Setting<Integer> repairPct = sgAuto.add(new IntSetting.Builder()
@@ -495,6 +511,9 @@ public class SatelliteScanner extends Module {
         pilot.rocketSlot = rocketSlot.get() - 1;
         pilot.minSpeed = minSpeed.get();
         pilot.useChest = useChest.get();
+        pilot.lowFlight = lowFlight.get();
+        pilot.hoverHeight = hoverHeight.get();
+        pilot.climbLookahead = climbLookahead.get();
     }
 
     /* 备用：Baritone 没注册成功时，直接在聊天发送阶段拦截 #scan */
@@ -624,8 +643,9 @@ public class SatelliteScanner extends Module {
         buildRoute(spacing);
 
         regionActive = true;
-        info("区域扫描开始：X %d ~ %d，Z %d ~ %d，共 %d 个航点（航线间隔 %d 格，飞行高度 Y=%d，已强制开启标记规则）",
-            regMinX, regMaxX, regMinZ, regMaxZ, route.size(), spacing, cruiseAltitude.get());
+        info("区域扫描开始：X %d ~ %d，Z %d ~ %d，共 %d 个航点（航线间隔 %d 格，%s，已强制开启标记规则）",
+            regMinX, regMaxX, regMinZ, regMaxZ, route.size(), spacing,
+            lowFlight.get() ? ("低空地形跟随，悬停高度 " + hoverHeight.get()) : ("固定高度 Y=" + cruiseAltitude.get()));
         pushQq(String.format(Locale.ROOT, "区域扫描开始 X %d~%d Z %d~%d %s",
             regMinX, regMaxX, regMinZ, regMaxZ, timeStr()));
         pilot.start(new ArrayList<>(route));
@@ -1396,7 +1416,7 @@ public class SatelliteScanner extends Module {
     }
 
 /**
- * 鞘翅自动驾驶：起飞 -> 在固定高度沿航线巡航 -> 降落。
+ * 鞘翅自动驾驶：起飞 -> 在固定高度或地形跟随低飞沿航线巡航 -> 降落。
  * 补给流程：耐久低 / 火箭少 -> 降落 -> 背包里拿经验瓶修补、拿火箭 -> 背包没有就放末影箱去拿 -> 还是没有就（落地后）下线。
  * 火箭固定放在 rocketSlot 这个快捷栏格子，不占副手；副手留给你自己放的图腾（脚本会自动把背包里的图腾放进副手，
  * 但从不会把它换走）。经验瓶/末影箱/镐临时用 supplySlot 这个快捷栏格子。
@@ -1405,7 +1425,7 @@ private static final class ElytraPilot {
     private enum Mode { IDLE, PREP, TAKEOFF, CRUISE, LAND, REPAIR, CHEST }
 
     /* ===== 参数（由模块每 tick 写入） ===== */
-    int altitude = 330;
+    int altitude = 330;      // 固定高度模式使用；低飞模式下不生效
     int minRockets = 6;
     int landBelow = 80;      // 鞘翅剩余耐久 <= 这个值就降落修补
     int repairPct = 90;      // 修到多少 %
@@ -1413,6 +1433,9 @@ private static final class ElytraPilot {
     int rocketSlot = 7;      // 快捷栏下标 0~8（固定放火箭，不占副手）
     double minSpeed = 1.0;   // 格/tick，低于就放火箭
     boolean useChest = true;
+    boolean lowFlight = false;  // 开：地形跟随低飞；关：固定 altitude 高空巡航
+    int hoverHeight = 30;       // 低飞模式：目标高度 = 前方地形最高点 + 这个值
+    int climbLookahead = 64;    // 低飞模式：往飞行方向看多远来判断要不要提前爬升
 
     private static final int ARRIVE_DIST = 40;
     private static final int ROCKET_GAP = 15;
@@ -1562,7 +1585,7 @@ private static final class ElytraPilot {
         tkTicks = 0;
         takeoffY = p.getY();
         mode = Mode.TAKEOFF;
-        say("起飞，目标高度 Y=" + altitude);
+        say("起飞" + (lowFlight ? "（地形跟随低飞）" : "，目标高度 Y=" + altitude));
     }
 
     private boolean ensureElytra(Minecraft mc, LocalPlayer p) {
@@ -1661,7 +1684,7 @@ private static final class ElytraPilot {
         }
 
         double v = p.getDeltaMovement().length();
-        double err = altitude - p.getY();
+        double err = lowFlight ? terrainTarget(mc.level, p) - p.getY() : altitude - p.getY();
         float pitch;
         if (err > 40) pitch = (p.getY() < takeoffY + 45) ? -75f : -50f;
         else pitch = (float) Mth.clamp(-err * 0.8, -30.0, 25.0);
@@ -1730,6 +1753,26 @@ private static final class ElytraPilot {
     private static boolean landable(Level w, int x, int z) {
         int y = w.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) - 1;
         return w.getFluidState(new BlockPos(x, y, z)).isEmpty();
+    }
+
+    // 低飞模式：往飞行方向每隔 8 格采样一次地形高度，取最高点 + 悬停高度作为目标。
+    // 采样点所在区块没加载就跳过（不当成"那里没有地形"，避免误判成可以下降）。
+    // 不设上限：遇到很高的山会一直爬升，直到高过山顶 + 悬停高度。
+    private double terrainTarget(Level w, LocalPlayer p) {
+        int maxGround = groundHeight(w, p.getBlockX(), p.getBlockZ());
+        double yaw = Math.toRadians(p.getYRot());
+        double dirX = -Math.sin(yaw), dirZ = Math.cos(yaw);
+        for (int d = 8; d <= climbLookahead; d += 8) {
+            int x = (int) Math.floor(p.getX() + dirX * d);
+            int z = (int) Math.floor(p.getZ() + dirZ * d);
+            if (!w.hasChunk(x >> 4, z >> 4)) continue;
+            maxGround = Math.max(maxGround, groundHeight(w, x, z));
+        }
+        return maxGround + hoverHeight;
+    }
+
+    private static int groundHeight(Level w, int x, int z) {
+        return w.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z);
     }
 
     /* ========== 站在地上扔经验瓶修补 ========== */
