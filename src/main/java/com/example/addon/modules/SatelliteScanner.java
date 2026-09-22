@@ -1991,7 +1991,7 @@ private static final class ElytraPilot {
         say("自动下线：" + reason);
         qqUrgent.accept("自动下线：" + reason);
         onEnd.accept(false);
-        mc.disconnect();
+        mc.disconnect(null, false);
     }
 }
 }
