@@ -46,8 +46,6 @@ import java.util.regex.Pattern;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.Direction;
-import net.minecraft.network.chat.Component;
-import net.minecraft.network.protocol.game.ClientboundDisconnectPacket;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
@@ -1937,14 +1935,15 @@ private static final class ElytraPilot {
     }
 
     // 从固定快捷栏格子放火箭：临时切到该格子、使用、再切回原来选中的格子
+    // 26.2 起 Inventory.selected 变为私有字段，改用 getSelectedSlot()/setSelectedSlot() 访问
     private void fireRocket(Minecraft mc, LocalPlayer p) {
         ItemStack r = p.getInventory().getItem(rocketSlot);
         if (!r.is(Items.FIREWORK_ROCKET)) return;
-        int prevSelected = p.getInventory().selected;
-        p.getInventory().selected = rocketSlot;
+        int prevSelected = p.getInventory().getSelectedSlot();
+        p.getInventory().setSelectedSlot(rocketSlot);
         mc.gameMode.useItem(p, InteractionHand.MAIN_HAND);
         p.swing(InteractionHand.MAIN_HAND);
-        p.getInventory().selected = prevSelected;
+        p.getInventory().setSelectedSlot(prevSelected);
         lastRocket = tick;
     }
 
@@ -1984,15 +1983,15 @@ private static final class ElytraPilot {
         say.accept(s);
     }
 
+    // 26.2 起改用 mc.disconnect() 主动断开客户端连接，不再依赖
+    // net.minecraft.network.protocol.game.ClientboundDisconnectPacket（该类已从 mapping 中移除/改名）
     private void logout(Minecraft mc, String reason) {
         mode = Mode.IDLE;
         jump(mc, false);
         say("自动下线：" + reason);
         qqUrgent.accept("自动下线：" + reason);
         onEnd.accept(false);
-        if (mc.getConnection() != null) {
-            mc.getConnection().handleDisconnect(new ClientboundDisconnectPacket(Component.literal("[卫星雷达] 自动下线：" + reason)));
-        }
+        mc.disconnect();
     }
 }
 }
