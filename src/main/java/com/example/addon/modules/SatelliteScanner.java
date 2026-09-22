@@ -788,8 +788,6 @@ public class SatelliteScanner extends Module {
         double r = range.get();
         int radius = r <= 0 ? MAX_RANGE : (int) Math.min(r, MAX_RANGE);
         int rc = (radius + 15) >> 4;
-        // 上一轮已经知道真正加载了多远，就不再去查那些肯定没加载的区块
-        if (lastMaxDist > 0) rc = Math.min(rc, lastMaxDist + 2);
 
         BlockPos c = mc.player.blockPosition();
         sweepPcx = c.getX() >> 4;
