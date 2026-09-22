@@ -252,8 +252,8 @@ public class SatelliteScanner extends Module {
 
     private final Setting<Integer> climbLookahead = sgAuto.add(new IntSetting.Builder()
         .name("climb-lookahead")
-        .description("低飞模式下往前看多远（格）来判断要不要提前爬升。越大越安全，但飞行轨迹会更早被远处的山影响，显得没那么贴地")
-        .defaultValue(64).min(16).max(256).build());
+        .description("低飞模式下往前看多远（格）来判断要不要提前爬升，默认 30 格。越大越安全，但飞行轨迹会更早被远处的山影响，显得没那么贴地")
+        .defaultValue(30).min(16).max(256).build());
 
     private final Setting<Integer> laneSpacing = sgAuto.add(new IntSetting.Builder()
         .name("lane-spacing")
@@ -1435,7 +1435,7 @@ private static final class ElytraPilot {
     boolean useChest = true;
     boolean lowFlight = false;  // 开：地形跟随低飞；关：固定 altitude 高空巡航
     int hoverHeight = 30;       // 低飞模式：目标高度 = 前方地形最高点 + 这个值
-    int climbLookahead = 64;    // 低飞模式：往飞行方向看多远来判断要不要提前爬升
+    int climbLookahead = 30;    // 低飞模式：往飞行方向看多远来判断要不要提前爬升
 
     private static final int ARRIVE_DIST = 40;
     private static final int ROCKET_GAP = 15;
@@ -1686,13 +1686,26 @@ private static final class ElytraPilot {
         double v = p.getDeltaMovement().length();
         double err = lowFlight ? terrainTarget(mc.level, p) - p.getY() : altitude - p.getY();
         float pitch;
-        if (err > 40) pitch = (p.getY() < takeoffY + 45) ? -75f : -50f;
-        else pitch = (float) Mth.clamp(-err * 0.8, -30.0, 25.0);
+        if (lowFlight) {
+            // 低飞模式：需要爬升时优先给足角度，宁可掉速也不要撞地形；err 越小才慢慢拉平
+            if (err > 25) pitch = -60f;
+            else if (err > 8) pitch = (float) Mth.clamp(-err * 1.6, -60.0, 10.0);
+            else pitch = (float) Mth.clamp(-err * 0.9, -20.0, 25.0);
+        } else if (err > 40) {
+            pitch = (p.getY() < takeoffY + 45) ? -75f : -50f;
+        } else {
+            pitch = (float) Mth.clamp(-err * 0.8, -30.0, 25.0);
+        }
         if (v < 0.45 && pitch < 8f) pitch = 8f; // 防失速
 
         p.setXRot(pitch);
         p.setYRot(yawTo(dx, dz));
-        if (v < minSpeed && tick - lastRocket >= ROCKET_GAP) fireRocket(mc, p);
+
+        // 陡爬升很吃速度，容易越爬越慢最后失速下坠：爬升中放烟花的间隔比平时短
+        boolean urgentClimb = lowFlight && err > 15 && v < 1.1;
+        if ((v < minSpeed || urgentClimb) && tick - lastRocket >= (urgentClimb ? 6 : ROCKET_GAP)) {
+            fireRocket(mc, p);
+        }
     }
 
     private boolean checkSupplies(LocalPlayer p) {
@@ -1755,18 +1768,33 @@ private static final class ElytraPilot {
         return w.getFluidState(new BlockPos(x, y, z)).isEmpty();
     }
 
-    // 低飞模式：往飞行方向每隔 8 格采样一次地形高度，取最高点 + 悬停高度作为目标。
-    // 采样点所在区块没加载就跳过（不当成"那里没有地形"，避免误判成可以下降）。
-    // 不设上限：遇到很高的山会一直爬升，直到高过山顶 + 悬停高度。
+    // 低飞模式：在 climbLookahead（默认 30）格范围内检测前方障碍物（含树冠）。
+    // 沿实际飞行方向（优先用速度向量，几乎静止时退回用朝向）扫描，
+    // 从 2 格外开始、每 4 格采一次，并在飞行路径左右各偏 1.5 格再各采一条线，
+    // 防止单点射线从树冠旁边擦过而漏检单棵树。不设上限：遇到很高的山会一直爬升。
     private double terrainTarget(Level w, LocalPlayer p) {
         int maxGround = groundHeight(w, p.getBlockX(), p.getBlockZ());
-        double yaw = Math.toRadians(p.getYRot());
-        double dirX = -Math.sin(yaw), dirZ = Math.cos(yaw);
-        for (int d = 8; d <= climbLookahead; d += 8) {
-            int x = (int) Math.floor(p.getX() + dirX * d);
-            int z = (int) Math.floor(p.getZ() + dirZ * d);
-            if (!w.hasChunk(x >> 4, z >> 4)) continue;
-            maxGround = Math.max(maxGround, groundHeight(w, x, z));
+
+        Vec3 v = p.getDeltaMovement();
+        double speed = Math.hypot(v.x, v.z);
+        double dirX, dirZ;
+        if (speed > 0.15) {
+            dirX = v.x / speed;
+            dirZ = v.z / speed;
+        } else {
+            double yaw = Math.toRadians(p.getYRot());
+            dirX = -Math.sin(yaw);
+            dirZ = Math.cos(yaw);
+        }
+        double perpX = -dirZ, perpZ = dirX; // 与飞行方向垂直的单位向量，左右各探一条线
+
+        for (int d = 2; d <= climbLookahead; d += 4) {
+            for (double off : new double[]{-1.5, 0, 1.5}) {
+                int x = (int) Math.floor(p.getX() + dirX * d + perpX * off);
+                int z = (int) Math.floor(p.getZ() + dirZ * d + perpZ * off);
+                if (!w.hasChunk(x >> 4, z >> 4)) continue;
+                maxGround = Math.max(maxGround, groundHeight(w, x, z));
+            }
         }
         return maxGround + hoverHeight;
     }
