@@ -255,10 +255,10 @@ public class SatelliteScanner extends Module {
         .description("低飞模式下往前看多远（格）来判断要不要提前爬升，默认 30 格。越大越安全，但飞行轨迹会更早被远处的山影响，显得没那么贴地")
         .defaultValue(30).min(16).max(256).build());
 
-    private final Setting<Integer> laneSpacing = sgAuto.add(new IntSetting.Builder()
-        .name("lane-spacing")
-        .description("航线间隔（格），0 = 按已加载范围自动算。珍珠只在服务器实体追踪范围（约64格）内能看到，找珍珠建议设 128")
-        .defaultValue(0).min(0).max(MAX_SPACING).build());
+    private final Setting<Integer> climbTolerance = sgAuto.add(new IntSetting.Builder()
+        .name("climb-tolerance")
+        .description("低飞模式的容错：前方地形比脚下地面高出超过这个值（格）才提前爬升，小于这个值的小起伏（土坡、单棵树）忽略不理，避免飞行高度反复抖动")
+        .defaultValue(10).min(0).max(80).build());
 
     private final Setting<Integer> minRockets = sgAuto.add(new IntSetting.Builder()
         .name("min-rockets")
@@ -514,6 +514,7 @@ public class SatelliteScanner extends Module {
         pilot.lowFlight = lowFlight.get();
         pilot.hoverHeight = hoverHeight.get();
         pilot.climbLookahead = climbLookahead.get();
+        pilot.climbTolerance = climbTolerance.get();
     }
 
     /* 备用：Baritone 没注册成功时，直接在聊天发送阶段拦截 #scan */
@@ -1436,6 +1437,7 @@ private static final class ElytraPilot {
     boolean lowFlight = false;  // 开：地形跟随低飞；关：固定 altitude 高空巡航
     int hoverHeight = 30;       // 低飞模式：目标高度 = 前方地形最高点 + 这个值
     int climbLookahead = 30;    // 低飞模式：往飞行方向看多远来判断要不要提前爬升
+    int climbTolerance = 10;    // 低飞模式：前方地形比脚下高出超过这个值才提前爬升，否则忽略小起伏
 
     private static final int ARRIVE_DIST = 40;
     private static final int ROCKET_GAP = 15;
@@ -1772,8 +1774,12 @@ private static final class ElytraPilot {
     // 沿实际飞行方向（优先用速度向量，几乎静止时退回用朝向）扫描，
     // 从 2 格外开始、每 4 格采一次，并在飞行路径左右各偏 1.5 格再各采一条线，
     // 防止单点射线从树冠旁边擦过而漏检单棵树。不设上限：遇到很高的山会一直爬升。
+    //
+    // 容错（climbTolerance）：前方最高点只有比脚下地面高出超过这个值才会被采用来抬升目标高度，
+    // 否则仍按脚下地面算，避免小土坡、单棵树之类的小起伏让飞行高度反复抖动。
     private double terrainTarget(Level w, LocalPlayer p) {
-        int maxGround = groundHeight(w, p.getBlockX(), p.getBlockZ());
+        int baseGround = groundHeight(w, p.getBlockX(), p.getBlockZ());
+        int maxAhead = baseGround;
 
         Vec3 v = p.getDeltaMovement();
         double speed = Math.hypot(v.x, v.z);
@@ -1793,10 +1799,12 @@ private static final class ElytraPilot {
                 int x = (int) Math.floor(p.getX() + dirX * d + perpX * off);
                 int z = (int) Math.floor(p.getZ() + dirZ * d + perpZ * off);
                 if (!w.hasChunk(x >> 4, z >> 4)) continue;
-                maxGround = Math.max(maxGround, groundHeight(w, x, z));
+                maxAhead = Math.max(maxAhead, groundHeight(w, x, z));
             }
         }
-        return maxGround + hoverHeight;
+
+        int ground = (maxAhead - baseGround > climbTolerance) ? maxAhead : baseGround;
+        return ground + hoverHeight;
     }
 
     private static int groundHeight(Level w, int x, int z) {
@@ -2052,7 +2060,7 @@ private static final class ElytraPilot {
         say.accept(s);
     }
 
-    // 26.2 起改用 mc.disconnect() 主动断开客户端连接，不再依赖
+    // 26.2 起改用 mc.disconnect(Screen, boolean) 主动断开客户端连接，不再依赖
     // net.minecraft.network.protocol.game.ClientboundDisconnectPacket（该类已从 mapping 中移除/改名）
     private void logout(Minecraft mc, String reason) {
         mode = Mode.IDLE;
