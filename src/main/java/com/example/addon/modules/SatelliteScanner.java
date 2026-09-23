@@ -431,6 +431,8 @@ public class SatelliteScanner extends Module {
         if (qmEnabled.get()) {
             qmLines.add("已启动 " + timeStr() + "，推送正常时会收到这条消息");
         }
+        info("[配置确认] 低空地形跟随=%s 悬停高度=%d 爬升前瞻=%d 爬升容错=%d 固定巡航高度=%d",
+            lowFlight.get(), hoverHeight.get(), climbLookahead.get(), climbTolerance.get(), cruiseAltitude.get());
     }
 
     @Override
