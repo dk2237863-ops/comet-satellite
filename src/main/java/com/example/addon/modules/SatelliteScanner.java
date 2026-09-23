@@ -192,7 +192,7 @@ public class SatelliteScanner extends Module {
 
     private final Setting<Boolean> strictMarker = sgGeneral.add(new BoolSetting.Builder()
         .name("strict-marker-rule")
-        .description("开：任何箱子类方块，100格内没有末影箱/潜影盒/珍珠点就当误报不报。区域扫描时强制开启")
+        .description("开：任何箱子类方块，100格内没有末影箱/潜影盒/珍珠点就当误报不报；关：不管有没有标记都会通知。区域自动扫描（鞘翅飞行）时同样只由这一个开关决定，不会被强制开启")
         .defaultValue(true)
         .build());
 
@@ -431,8 +431,9 @@ public class SatelliteScanner extends Module {
         if (qmEnabled.get()) {
             qmLines.add("已启动 " + timeStr() + "，推送正常时会收到这条消息");
         }
-        info("[配置确认] 低空地形跟随=%s 悬停高度=%d 爬升前瞻=%d 爬升容错=%d 固定巡航高度=%d",
-            lowFlight.get(), hoverHeight.get(), climbLookahead.get(), climbTolerance.get(), cruiseAltitude.get());
+        info("[配置确认] 低空地形跟随=%s 悬停高度=%d 爬升前瞻=%d 爬升容错=%d 固定巡航高度=%d 严格标记规则=%s",
+            lowFlight.get(), hoverHeight.get(), climbLookahead.get(), climbTolerance.get(), cruiseAltitude.get(),
+            strictMarker.get());
     }
 
     @Override
@@ -470,7 +471,7 @@ public class SatelliteScanner extends Module {
     }
 
     private boolean strictNow() {
-        return strictMarker.get() || regionActive;
+        return strictMarker.get();
     }
 
     @EventHandler
@@ -651,9 +652,10 @@ public class SatelliteScanner extends Module {
         buildRoute(spacing);
 
         regionActive = true;
-        info("区域扫描开始：X %d ~ %d，Z %d ~ %d，共 %d 个航点（航线间隔 %d 格，%s，已强制开启标记规则）",
+        info("区域扫描开始：X %d ~ %d，Z %d ~ %d，共 %d 个航点（航线间隔 %d 格，%s，%s）",
             regMinX, regMaxX, regMinZ, regMaxZ, route.size(), spacing,
-            lowFlight.get() ? ("低空地形跟随，悬停高度 " + hoverHeight.get()) : ("固定高度 Y=" + cruiseAltitude.get()));
+            lowFlight.get() ? ("低空地形跟随，悬停高度 " + hoverHeight.get()) : ("固定高度 Y=" + cruiseAltitude.get()),
+            strictNow() ? "严格标记规则已开启" : "严格标记规则未开启（会报出更多天然结构里的箱子）");
         pushQq(String.format(Locale.ROOT, "区域扫描开始 X %d~%d Z %d~%d %s",
             regMinX, regMaxX, regMinZ, regMaxZ, timeStr()));
         pilot.start(new ArrayList<>(route));
