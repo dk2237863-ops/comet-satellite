@@ -260,6 +260,11 @@ public class SatelliteScanner extends Module {
         .description("低飞模式的容错：前方地形比脚下地面高出超过这个值（格）才提前爬升，小于这个值的小起伏（土坡、单棵树）忽略不理，避免飞行高度反复抖动")
         .defaultValue(10).min(0).max(80).build());
 
+    private final Setting<Integer> laneSpacing = sgAuto.add(new IntSetting.Builder()
+        .name("lane-spacing")
+        .description("航线间隔（格），0 = 按已加载范围自动算。珍珠只在服务器实体追踪范围（约64格）内能看到，找珍珠建议设 128")
+        .defaultValue(0).min(0).max(MAX_SPACING).build());
+
     private final Setting<Integer> minRockets = sgAuto.add(new IntSetting.Builder()
         .name("min-rockets")
         .description("背包+副手火箭少于这个数就降落补给（背包 -> 末影箱 -> 下线）")
