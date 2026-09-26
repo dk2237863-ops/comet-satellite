@@ -10,6 +10,8 @@ import java.util.stream.Stream;
 
 /**
  * 通过反射调用 Baritone API：不需要改 build 配置，没装 Baritone 时所有方法都会安全地返回 false。
+ * 现在只用来把 #scan 指令注册进 Baritone 的指令系统，方便直接在聊天栏用 #scan 调用；
+ * 飞行、寻路、补给全部由 SatelliteScanner 内部的 ElytraPilot 自己完成，不依赖 Baritone 的寻路/鞘翅模块。
  */
 final class BaritoneBridge {
     private volatile String lastError = "";
@@ -34,52 +36,6 @@ final class BaritoneBridge {
         Object baritone = providerCls.getMethod("getPrimaryBaritone").invoke(provider);
         if (baritone == null) throw new IllegalStateException("Baritone 还没有初始化");
         return baritone;
-    }
-
-    /** 让 Baritone 走到指定的 X/Z（只看水平坐标）。 */
-    boolean goToXZ(int x, int z) {
-        try {
-            Object baritone = primary();
-            Object process = Class.forName("baritone.api.IBaritone")
-                .getMethod("getCustomGoalProcess").invoke(baritone);
-            Class<?> goalCls = Class.forName("baritone.api.pathing.goals.Goal");
-            Object goal = Class.forName("baritone.api.pathing.goals.GoalXZ")
-                .getConstructor(int.class, int.class).newInstance(x, z);
-            Class.forName("baritone.api.process.ICustomGoalProcess")
-                .getMethod("setGoalAndPath", goalCls).invoke(process, goal);
-            return true;
-        } catch (Throwable t) {
-            fail(t);
-            return false;
-        }
-    }
-
-    boolean stop() {
-        try {
-            Object baritone = primary();
-            Object behavior = Class.forName("baritone.api.IBaritone")
-                .getMethod("getPathingBehavior").invoke(baritone);
-            Class.forName("baritone.api.behavior.IPathingBehavior")
-                .getMethod("cancelEverything").invoke(behavior);
-            return true;
-        } catch (Throwable t) {
-            fail(t);
-            return false;
-        }
-    }
-
-    boolean isPathing() {
-        try {
-            Object baritone = primary();
-            Object behavior = Class.forName("baritone.api.IBaritone")
-                .getMethod("getPathingBehavior").invoke(baritone);
-            Object r = Class.forName("baritone.api.behavior.IPathingBehavior")
-                .getMethod("isPathing").invoke(behavior);
-            return r instanceof Boolean && (Boolean) r;
-        } catch (Throwable t) {
-            fail(t);
-            return false;
-        }
     }
 
     /** 向 Baritone 注册一条自定义指令（用 # 前缀调用）。 */
