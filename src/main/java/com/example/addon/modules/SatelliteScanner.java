@@ -178,143 +178,143 @@ public class SatelliteScanner extends Module {
 
     /* ========== 通用 ========== */
     private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
-        .name("range")
+        .name("扫描半径")
         .description("扫描半径，0 或超过 512 都按 512 算（实际受服务器视距限制）")
         .defaultValue(0.0)
         .min(0.0)
         .build());
 
     private final Setting<Boolean> lockNatural = sgGeneral.add(new BoolSetting.Builder()
-        .name("lock-natural-structures")
+        .name("扫描天然结构内的方块")
         .description("开：天然结构里的方块也锁定通知；关：跳过它们（附近100格有末影箱/潜影盒/珍珠点除外）")
         .defaultValue(false)
         .build());
 
     private final Setting<Boolean> strictMarker = sgGeneral.add(new BoolSetting.Builder()
-        .name("strict-marker-rule")
+        .name("严格标记规则")
         .description("开：任何箱子类方块，100格内没有末影箱/潜影盒/珍珠点就当误报不报；关：不管有没有标记都会通知。区域自动扫描（鞘翅飞行）时同样只由这一个开关决定，不会被强制开启")
         .defaultValue(true)
         .build());
 
     private final Setting<Boolean> pearls = sgGeneral.add(new BoolSetting.Builder()
-        .name("pearls")
+        .name("扫描末影珍珠")
         .description("扫描末影珍珠")
         .defaultValue(true)
         .build());
 
     /* ========== 容器开关 ========== */
     private final Setting<Boolean> scanContainers = sgContainers.add(new BoolSetting.Builder()
-        .name("scan-containers")
+        .name("容器扫描总开关")
         .description("容器扫描总开关：关掉就完全不扫方块容器（珍珠不受影响）")
         .defaultValue(true)
         .build());
 
     private final Setting<Boolean> shulkers = sgContainers.add(new BoolSetting.Builder()
-        .name("shulkers").description("潜影盒").defaultValue(true).build());
+        .name("潜影盒").description("潜影盒").defaultValue(true).build());
 
     private final Setting<Boolean> enderChests = sgContainers.add(new BoolSetting.Builder()
-        .name("ender-chests").description("末影箱").defaultValue(true).build());
+        .name("末影箱").description("末影箱").defaultValue(true).build());
 
     private final Setting<Boolean> chests = sgContainers.add(new BoolSetting.Builder()
-        .name("chests").description("箱子").defaultValue(true).build());
+        .name("箱子").description("箱子").defaultValue(true).build());
 
     private final Setting<Boolean> trappedChests = sgContainers.add(new BoolSetting.Builder()
-        .name("trapped-chests").description("陷阱箱").defaultValue(true).build());
+        .name("陷阱箱").description("陷阱箱").defaultValue(true).build());
 
     private final Setting<Boolean> barrels = sgContainers.add(new BoolSetting.Builder()
-        .name("barrels").description("木桶").defaultValue(true).build());
+        .name("木桶").description("木桶").defaultValue(true).build());
 
     private final Setting<Boolean> hoppers = sgContainers.add(new BoolSetting.Builder()
-        .name("hoppers").description("漏斗").defaultValue(true).build());
+        .name("漏斗").description("漏斗").defaultValue(true).build());
 
     private final Setting<Boolean> dispensers = sgContainers.add(new BoolSetting.Builder()
-        .name("dispensers").description("发射器").defaultValue(true).build());
+        .name("发射器").description("发射器").defaultValue(true).build());
 
     private final Setting<Boolean> droppers = sgContainers.add(new BoolSetting.Builder()
-        .name("droppers").description("投掷器").defaultValue(true).build());
+        .name("投掷器").description("投掷器").defaultValue(true).build());
 
     /* ========== 区域自动扫描（鞘翅） ========== */
     private final Setting<Integer> cruiseAltitude = sgAuto.add(new IntSetting.Builder()
-        .name("cruise-altitude")
-        .description("固定高度巡航时用的 Y。开启 low-altitude-terrain-follow 后这个值不再生效")
+        .name("固定巡航高度")
+        .description("固定高度巡航时用的 Y。开启“低空地形跟随”后这个值不再生效")
         .defaultValue(330).min(150).max(1000).build());
 
     private final Setting<Boolean> lowFlight = sgAuto.add(new BoolSetting.Builder()
-        .name("low-altitude-terrain-follow")
-        .description("开：不再固定高度巡航，改为贴着地形低飞，前方地形升高会提前爬升。基于地形采样，不是真正的碰撞检测，遇到陡崖/尖塔可能反应不及，请配合足够大的 hover-height / climb-lookahead")
+        .name("低空地形跟随")
+        .description("开：不再固定高度巡航，改为贴着地形低飞，前方地形升高会提前爬升。基于地形采样，不是真正的碰撞检测，遇到陡崖/尖塔可能反应不及，请配合足够大的悬停高度/爬升前瞻距离")
         .defaultValue(false)
         .build());
 
     private final Setting<Integer> hoverHeight = sgAuto.add(new IntSetting.Builder()
-        .name("hover-height")
+        .name("悬停高度")
         .description("低飞模式下，目标高度 = 前方看到的最高地形 + 这个值。飞得快就调大一点，留够反应余量")
         .defaultValue(30).min(8).max(120).build());
 
     private final Setting<Integer> climbLookahead = sgAuto.add(new IntSetting.Builder()
-        .name("climb-lookahead")
+        .name("爬升前瞻距离")
         .description("低飞模式下往前看多远（格）来判断要不要提前爬升，默认 30 格。越大越安全，但飞行轨迹会更早被远处的山影响，显得没那么贴地")
         .defaultValue(30).min(16).max(256).build());
 
     private final Setting<Integer> climbTolerance = sgAuto.add(new IntSetting.Builder()
-        .name("climb-tolerance")
+        .name("爬升容错")
         .description("低飞模式的容错：前方地形比脚下地面高出超过这个值（格）才提前爬升，小于这个值的小起伏（土坡、单棵树）忽略不理，避免飞行高度反复抖动")
         .defaultValue(10).min(0).max(80).build());
 
     private final Setting<Integer> laneSpacing = sgAuto.add(new IntSetting.Builder()
-        .name("lane-spacing")
+        .name("航线间隔")
         .description("航线间隔（格），0 = 按已加载范围自动算。珍珠只在服务器实体追踪范围（约64格）内能看到，找珍珠建议设 128")
         .defaultValue(0).min(0).max(MAX_SPACING).build());
 
     private final Setting<Integer> minRockets = sgAuto.add(new IntSetting.Builder()
-        .name("min-rockets")
+        .name("最少火箭数")
         .description("背包+副手火箭少于这个数就降落补给（背包 -> 末影箱 -> 下线）")
         .defaultValue(6).min(1).max(64).build());
 
     private final Setting<Integer> landBelow = sgAuto.add(new IntSetting.Builder()
-        .name("land-below-durability")
+        .name("耐久低于此值时降落")
         .description("鞘翅剩余耐久低于这个值就降落修补。从高空降下来要几十秒，每秒掉1点，别设太低")
         .defaultValue(80).min(40).max(300).build());
 
     private final Setting<Integer> repairPct = sgAuto.add(new IntSetting.Builder()
-        .name("repair-to-percent")
+        .name("修复到百分比")
         .description("经验瓶修到多少 %（鞘翅必须有经验修补）")
         .defaultValue(90).min(50).max(100).build());
 
     private final Setting<Boolean> useChest = sgAuto.add(new BoolSetting.Builder()
-        .name("use-ender-chest")
+        .name("使用末影箱补给")
         .description("背包没有火箭/经验瓶时，落地放下末影箱去拿；有精准采集镐会收回末影箱")
         .defaultValue(true).build());
 
     private final Setting<Integer> supplySlot = sgAuto.add(new IntSetting.Builder()
-        .name("supply-hotbar-slot")
+        .name("周转用快捷栏格")
         .description("临时周转用的快捷栏格子（1-9），里面的东西可能被换走，请留空")
         .defaultValue(9).min(1).max(9).build());
 
     private final Setting<Integer> rocketSlot = sgAuto.add(new IntSetting.Builder()
-        .name("rocket-hotbar-slot")
+        .name("火箭固定快捷栏格")
         .description("火箭固定放这个快捷栏格子（1-9），不占副手，副手留给你自己放的图腾等物品")
         .defaultValue(8).min(1).max(9).build());
 
     private final Setting<Double> minSpeed = sgAuto.add(new DoubleSetting.Builder()
-        .name("min-speed")
+        .name("最低速度")
         .description("速度（格/tick）低于这个值就放一发火箭")
         .defaultValue(1.0).min(0.5).max(1.4).build());
 
     /* ========== Qmsg酱 推送设置 ========== */
     private final Setting<Boolean> qmEnabled = sgQm.add(new BoolSetting.Builder()
-        .name("qmsg-enabled")
+        .name("启用QQ推送")
         .description("把扫描结果通过 Qmsg酱 推送到 QQ（一条一条发，发过的不再发）")
         .defaultValue(false)
         .build());
 
     private final Setting<String> qmKey = sgQm.add(new StringSetting.Builder()
-        .name("qmsg-key")
+        .name("QmsgKey")
         .description("Qmsg酱 控制台里的 API Key（不要泄露）")
         .defaultValue("")
         .build());
 
     private final Setting<Integer> qmInterval = sgQm.add(new IntSetting.Builder()
-        .name("qmsg-interval-seconds")
+        .name("推送间隔秒数")
         .description("两条消息之间的间隔（秒）。Qmsg酱要求同一 Key 至少间隔 5 秒，每天最多 500 条")
         .defaultValue(15)
         .min(5)
@@ -322,13 +322,13 @@ public class SatelliteScanner extends Module {
         .build());
 
     private final Setting<String> qmGroup = sgQm.add(new StringSetting.Builder()
-        .name("qmsg-group")
+        .name("QQ群号")
         .description("目标QQ群号，留空则发到你的QQ单聊（群需先在Qmsg酱控制台绑定）")
         .defaultValue("")
         .build());
 
     private final Setting<String> qmHost = sgQm.add(new StringSetting.Builder()
-        .name("qmsg-host")
+        .name("接口域名")
         .description("接口域名，默认官方地址")
         .defaultValue("https://qmsg.zendee.cn")
         .build());
@@ -373,6 +373,7 @@ public class SatelliteScanner extends Module {
     private final ElytraPilot pilot;
     private final ArrayList<int[]> route = new ArrayList<>();
     private boolean regionActive = false;
+    private boolean regionPaused = false;
     private int regMinX, regMaxX, regMinZ, regMaxZ;
     private boolean cmdRegistered = false;
     private boolean cmdErrorShown = false;
@@ -424,6 +425,7 @@ public class SatelliteScanner extends Module {
         lastMaxDist = 0;
         lastReportedRange = 0;
         regionActive = false;
+        regionPaused = false;
         route.clear();
         qmFailing = false;
         qmError = null;
@@ -499,7 +501,7 @@ public class SatelliteScanner extends Module {
 
         if (regionActive) {
             applyPilotCfg();
-            pilot.tick(mc);
+            if (!regionPaused) pilot.tick(mc);
         }
 
         if (++entityTimer >= ENTITY_SCAN_TICKS) {
@@ -550,6 +552,8 @@ public class SatelliteScanner extends Module {
             List.of(
                 "用法：#scan x z, x z   （第一个是起点，第二个是终点）",
                 "例如：#scan 100 200, 500 800",
+                "#scan pause   暂停飞行（可以自己接管飞），保留已扫描的进度",
+                "#scan resume  从暂停的航点继续",
                 "#scan stop    停止区域扫描",
                 "#scan status  查看进度"
             ),
@@ -568,6 +572,14 @@ public class SatelliteScanner extends Module {
         if (low.equals("stop") || low.equals("cancel")) {
             boolean wasActive = regionActive;
             stopRegion(wasActive ? "已停止区域扫描，请自己接管飞行" : "当前没有区域扫描任务");
+            return;
+        }
+        if (low.equals("pause")) {
+            pauseRegion();
+            return;
+        }
+        if (low.equals("resume") || low.equals("continue")) {
+            resumeRegion();
             return;
         }
         if (low.equals("status")) {
@@ -610,7 +622,7 @@ public class SatelliteScanner extends Module {
 
     private void showUsage() {
         info("用法：#scan x z, x z（第一个是起点，第二个是终点），例如 #scan 100 200, 500 800");
-        info("#scan stop 停止；#scan status 查看进度");
+        info("#scan pause 暂停（可以自己飞）；#scan resume 继续；#scan stop 停止；#scan status 查看进度");
     }
 
     private void showStatus() {
@@ -618,7 +630,8 @@ public class SatelliteScanner extends Module {
             info("当前没有区域扫描任务");
             return;
         }
-        info("区域扫描进行中：X %d ~ %d，Z %d ~ %d，航点 %d/%d",
+        info("区域扫描进行中%s：X %d ~ %d，Z %d ~ %d，航点 %d/%d",
+            regionPaused ? "（已暂停）" : "",
             regMinX, regMaxX, regMinZ, regMaxZ, Math.min(pilot.waypointIndex() + 1, route.size()), route.size());
     }
 
@@ -652,6 +665,7 @@ public class SatelliteScanner extends Module {
         buildRoute(spacing);
 
         regionActive = true;
+        regionPaused = false;
         info("区域扫描开始：X %d ~ %d，Z %d ~ %d，共 %d 个航点（航线间隔 %d 格，%s，%s）",
             regMinX, regMaxX, regMinZ, regMaxZ, route.size(), spacing,
             lowFlight.get() ? ("低空地形跟随，悬停高度 " + hoverHeight.get()) : ("固定高度 Y=" + cruiseAltitude.get()),
@@ -704,6 +718,7 @@ public class SatelliteScanner extends Module {
     // 鞘翅驾驶结束：completed=true 是跑完并已降落；false 是中途下线/出错
     private void pilotEnded(boolean completed) {
         regionActive = false;
+        regionPaused = false;
         route.clear();
         if (completed) {
             info("区域扫描完成，已降落");
@@ -714,10 +729,57 @@ public class SatelliteScanner extends Module {
     private void stopRegion(String msg) {
         if (regionActive) {
             regionActive = false;
+            regionPaused = false;
             route.clear();
         }
         pilot.stop(Minecraft.getInstance());
         if (msg != null) info("%s", msg);
+    }
+
+    // 暂停：把飞行控制权交还给玩家，但保留航点进度、区域范围和已扫描到的数据
+    private void pauseRegion() {
+        if (!regionActive) {
+            info("当前没有区域扫描任务");
+            return;
+        }
+        if (regionPaused) {
+            info("已经是暂停状态，输入 #scan resume 继续");
+            return;
+        }
+        Minecraft mc = Minecraft.getInstance();
+        String problem = pilot.pause(mc);
+        if (problem != null) {
+            info("无法暂停：%s", problem);
+            return;
+        }
+        regionPaused = true;
+        info("区域扫描已暂停，航点 %d/%d，现在可以自己飞了。输入 #scan resume 继续（已扫描到的都还保留）",
+            pilot.waypointIndex() + 1, route.size());
+        pushQq("区域扫描已暂停 " + timeStr());
+    }
+
+    // 继续：从暂停的航点接管飞行，飞回航线继续扫同一片区域；已扫描过的数据不会重新报一遍
+    private void resumeRegion() {
+        if (!regionActive) {
+            info("当前没有区域扫描任务");
+            return;
+        }
+        if (!regionPaused) {
+            info("扫描并没有暂停");
+            return;
+        }
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null) return;
+        applyPilotCfg();
+        String problem = pilot.preflight(mc.player);
+        if (problem != null) {
+            info("无法继续：%s", problem);
+            return;
+        }
+        regionPaused = false;
+        pilot.resume();
+        info("继续区域扫描，前往航点 %d/%d", pilot.waypointIndex() + 1, route.size());
+        pushQq("区域扫描继续 " + timeStr());
     }
 
     private boolean inRegion(int x, int z) {
@@ -1311,15 +1373,15 @@ public class SatelliteScanner extends Module {
         String group = qmGroup.get().trim();
 
         if (!(host.startsWith("http://") || host.startsWith("https://"))) {
-            qmFail("qmsg-host 必须以 http:// 或 https:// 开头");
+            qmFail("接口域名必须以 http:// 或 https:// 开头");
             return false;
         }
         if (!key.matches("[A-Za-z0-9_-]{8,64}")) {
-            qmFail("qmsg-key 格式不对，请到 Qmsg酱 控制台复制 API Key");
+            qmFail("Key 格式不对，请到 Qmsg酱 控制台复制 API Key");
             return false;
         }
         if (!group.isEmpty() && !group.matches("\\d{5,12}")) {
-            qmFail("qmsg-group 应为群号数字，或者留空");
+            qmFail("QQ群号应为数字，或者留空");
             return false;
         }
         while (host.endsWith("/")) host = host.substring(0, host.length() - 1);
@@ -1427,12 +1489,14 @@ public class SatelliteScanner extends Module {
 
 /**
  * 鞘翅自动驾驶：起飞 -> 在固定高度或地形跟随低飞沿航线巡航 -> 降落。
+ * 支持暂停/继续：暂停时把飞行控制权交还给玩家（可以自己随便飞），继续时从暂停的航点接管飞行，
+ * 飞回原来的航线继续扫同一片区域；暂停期间不会清空已经扫到的数据，恢复后不会重复上报。
  * 补给流程：耐久低 / 火箭少 -> 降落 -> 背包里拿经验瓶修补、拿火箭 -> 背包没有就放末影箱去拿 -> 还是没有就（落地后）下线。
  * 火箭固定放在 rocketSlot 这个快捷栏格子，不占副手；副手留给你自己放的图腾（脚本会自动把背包里的图腾放进副手，
  * 但从不会把它换走）。经验瓶/末影箱/镐临时用 supplySlot 这个快捷栏格子。
  */
 private static final class ElytraPilot {
-    private enum Mode { IDLE, PREP, TAKEOFF, CRUISE, LAND, REPAIR, CHEST }
+    private enum Mode { IDLE, PREP, TAKEOFF, CRUISE, LAND, REPAIR, CHEST, PAUSED }
 
     /* ===== 参数（由模块每 tick 写入） ===== */
     int altitude = 330;      // 固定高度模式使用；低飞模式下不生效
@@ -1457,6 +1521,7 @@ private static final class ElytraPilot {
     private final Consumer<Boolean> onEnd; // true = 航线完成并已降落；false = 中止/下线
 
     private Mode mode = Mode.IDLE;
+    private Mode resumeMode = Mode.CRUISE; // 暂停前所在的模式，继续时恢复回去
     private List<int[]> route = List.of();
     private int idx;
     private long tick, lastRocket;
@@ -1510,8 +1575,30 @@ private static final class ElytraPilot {
         }
     }
 
+    /** 暂停：把控制权交还给玩家。只允许在巡航或地面待命时暂停，避免在起飞/降落/补给这类自动化过程中途打断。
+     *  返回 null 表示成功，否则是不能暂停的原因。 */
+    String pause(Minecraft mc) {
+        if (mode == Mode.IDLE) return "没有在飞行";
+        if (mode == Mode.PAUSED) return "已经是暂停状态";
+        if (mode != Mode.CRUISE && mode != Mode.PREP) {
+            return "正在起飞/降落/补给中，请等这个动作完成后再暂停";
+        }
+        resumeMode = mode;
+        mode = Mode.PAUSED;
+        jump(mc, false);
+        return null;
+    }
+
+    /** 继续：恢复到暂停前的模式（一般是 CRUISE），从玩家当前位置继续飞向原来的航点。 */
+    void resume() {
+        if (mode != Mode.PAUSED) return;
+        mode = resumeMode;
+    }
+
+    boolean isPaused() { return mode == Mode.PAUSED; }
+
     void tick(Minecraft mc) {
-        if (mode == Mode.IDLE) return;
+        if (mode == Mode.IDLE || mode == Mode.PAUSED) return;
         LocalPlayer p = mc.player;
         if (p == null || mc.level == null || mc.gameMode == null) return;
         if (p.isDeadOrDying()) {
@@ -1698,10 +1785,12 @@ private static final class ElytraPilot {
         double err = lowFlight ? terrainTarget(mc.level, p) - p.getY() : altitude - p.getY();
         float pitch;
         if (lowFlight) {
-            // 低飞模式：需要爬升时优先给足角度，宁可掉速也不要撞地形；err 越小才慢慢拉平
-            if (err > 25) pitch = -60f;
-            else if (err > 8) pitch = (float) Mth.clamp(-err * 1.6, -60.0, 10.0);
-            else pitch = (float) Mth.clamp(-err * 0.9, -20.0, 25.0);
+            // 10 格容错：需要爬升的高度在 10 格以内就不主动爬升，只做平飞微调；
+            // 超过 10 格才开始爬升，超出越多爬得越陡
+            double excess = err - 10.0;
+            if (excess > 15) pitch = -60f;
+            else if (excess > 0) pitch = (float) Mth.clamp(-excess * 2.2 - 6, -60.0, 10.0);
+            else pitch = (float) Mth.clamp(-err * 0.3, -8.0, 20.0);
         } else if (err > 40) {
             pitch = (p.getY() < takeoffY + 45) ? -75f : -50f;
         } else {
@@ -1713,7 +1802,7 @@ private static final class ElytraPilot {
         p.setYRot(yawTo(dx, dz));
 
         // 陡爬升很吃速度，容易越爬越慢最后失速下坠：爬升中放烟花的间隔比平时短
-        boolean urgentClimb = lowFlight && err > 15 && v < 1.1;
+        boolean urgentClimb = lowFlight && err > 20 && v < 1.1;
         if ((v < minSpeed || urgentClimb) && tick - lastRocket >= (urgentClimb ? 6 : ROCKET_GAP)) {
             fireRocket(mc, p);
         }
