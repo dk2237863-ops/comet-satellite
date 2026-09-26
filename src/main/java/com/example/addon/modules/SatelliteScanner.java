@@ -178,143 +178,143 @@ public class SatelliteScanner extends Module {
 
     /* ========== 通用 ========== */
     private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
-        .name("扫描半径")
+        .name("range")
         .description("扫描半径，0 或超过 512 都按 512 算（实际受服务器视距限制）")
         .defaultValue(0.0)
         .min(0.0)
         .build());
 
     private final Setting<Boolean> lockNatural = sgGeneral.add(new BoolSetting.Builder()
-        .name("扫描天然结构内的方块")
+        .name("lock-natural-structures")
         .description("开：天然结构里的方块也锁定通知；关：跳过它们（附近100格有末影箱/潜影盒/珍珠点除外）")
         .defaultValue(false)
         .build());
 
     private final Setting<Boolean> strictMarker = sgGeneral.add(new BoolSetting.Builder()
-        .name("严格标记规则")
+        .name("strict-marker-rule")
         .description("开：任何箱子类方块，100格内没有末影箱/潜影盒/珍珠点就当误报不报；关：不管有没有标记都会通知。区域自动扫描（鞘翅飞行）时同样只由这一个开关决定，不会被强制开启")
         .defaultValue(true)
         .build());
 
     private final Setting<Boolean> pearls = sgGeneral.add(new BoolSetting.Builder()
-        .name("扫描末影珍珠")
+        .name("pearls")
         .description("扫描末影珍珠")
         .defaultValue(true)
         .build());
 
     /* ========== 容器开关 ========== */
     private final Setting<Boolean> scanContainers = sgContainers.add(new BoolSetting.Builder()
-        .name("容器扫描总开关")
+        .name("scan-containers")
         .description("容器扫描总开关：关掉就完全不扫方块容器（珍珠不受影响）")
         .defaultValue(true)
         .build());
 
     private final Setting<Boolean> shulkers = sgContainers.add(new BoolSetting.Builder()
-        .name("潜影盒").description("潜影盒").defaultValue(true).build());
+        .name("shulkers").description("潜影盒").defaultValue(true).build());
 
     private final Setting<Boolean> enderChests = sgContainers.add(new BoolSetting.Builder()
-        .name("末影箱").description("末影箱").defaultValue(true).build());
+        .name("ender-chests").description("末影箱").defaultValue(true).build());
 
     private final Setting<Boolean> chests = sgContainers.add(new BoolSetting.Builder()
-        .name("箱子").description("箱子").defaultValue(true).build());
+        .name("chests").description("箱子").defaultValue(true).build());
 
     private final Setting<Boolean> trappedChests = sgContainers.add(new BoolSetting.Builder()
-        .name("陷阱箱").description("陷阱箱").defaultValue(true).build());
+        .name("trapped-chests").description("陷阱箱").defaultValue(true).build());
 
     private final Setting<Boolean> barrels = sgContainers.add(new BoolSetting.Builder()
-        .name("木桶").description("木桶").defaultValue(true).build());
+        .name("barrels").description("木桶").defaultValue(true).build());
 
     private final Setting<Boolean> hoppers = sgContainers.add(new BoolSetting.Builder()
-        .name("漏斗").description("漏斗").defaultValue(true).build());
+        .name("hoppers").description("漏斗").defaultValue(true).build());
 
     private final Setting<Boolean> dispensers = sgContainers.add(new BoolSetting.Builder()
-        .name("发射器").description("发射器").defaultValue(true).build());
+        .name("dispensers").description("发射器").defaultValue(true).build());
 
     private final Setting<Boolean> droppers = sgContainers.add(new BoolSetting.Builder()
-        .name("投掷器").description("投掷器").defaultValue(true).build());
+        .name("droppers").description("投掷器").defaultValue(true).build());
 
     /* ========== 区域自动扫描（鞘翅） ========== */
     private final Setting<Integer> cruiseAltitude = sgAuto.add(new IntSetting.Builder()
-        .name("固定巡航高度")
+        .name("cruise-altitude")
         .description("固定高度巡航时用的 Y。开启“低空地形跟随”后这个值不再生效")
         .defaultValue(330).min(150).max(1000).build());
 
     private final Setting<Boolean> lowFlight = sgAuto.add(new BoolSetting.Builder()
-        .name("低空地形跟随")
+        .name("low-altitude-terrain-follow")
         .description("开：不再固定高度巡航，改为贴着地形低飞，前方地形升高会提前爬升。基于地形采样，不是真正的碰撞检测，遇到陡崖/尖塔可能反应不及，请配合足够大的悬停高度/爬升前瞻距离")
         .defaultValue(false)
         .build());
 
     private final Setting<Integer> hoverHeight = sgAuto.add(new IntSetting.Builder()
-        .name("悬停高度")
+        .name("hover-height")
         .description("低飞模式下，目标高度 = 前方看到的最高地形 + 这个值。飞得快就调大一点，留够反应余量")
         .defaultValue(30).min(8).max(120).build());
 
     private final Setting<Integer> climbLookahead = sgAuto.add(new IntSetting.Builder()
-        .name("爬升前瞻距离")
+        .name("climb-lookahead")
         .description("低飞模式下往前看多远（格）来判断要不要提前爬升，默认 30 格。越大越安全，但飞行轨迹会更早被远处的山影响，显得没那么贴地")
         .defaultValue(30).min(16).max(256).build());
 
     private final Setting<Integer> climbTolerance = sgAuto.add(new IntSetting.Builder()
-        .name("爬升容错")
+        .name("climb-tolerance")
         .description("低飞模式的容错：前方地形比脚下地面高出超过这个值（格）才提前爬升，小于这个值的小起伏（土坡、单棵树）忽略不理，避免飞行高度反复抖动")
         .defaultValue(10).min(0).max(80).build());
 
     private final Setting<Integer> laneSpacing = sgAuto.add(new IntSetting.Builder()
-        .name("航线间隔")
+        .name("lane-spacing")
         .description("航线间隔（格），0 = 按已加载范围自动算。珍珠只在服务器实体追踪范围（约64格）内能看到，找珍珠建议设 128")
         .defaultValue(0).min(0).max(MAX_SPACING).build());
 
     private final Setting<Integer> minRockets = sgAuto.add(new IntSetting.Builder()
-        .name("最少火箭数")
+        .name("min-rockets")
         .description("背包+副手火箭少于这个数就降落补给（背包 -> 末影箱 -> 下线）")
         .defaultValue(6).min(1).max(64).build());
 
     private final Setting<Integer> landBelow = sgAuto.add(new IntSetting.Builder()
-        .name("耐久低于此值时降落")
+        .name("land-below-durability")
         .description("鞘翅剩余耐久低于这个值就降落修补。从高空降下来要几十秒，每秒掉1点，别设太低")
         .defaultValue(80).min(40).max(300).build());
 
     private final Setting<Integer> repairPct = sgAuto.add(new IntSetting.Builder()
-        .name("修复到百分比")
+        .name("repair-to-percent")
         .description("经验瓶修到多少 %（鞘翅必须有经验修补）")
         .defaultValue(90).min(50).max(100).build());
 
     private final Setting<Boolean> useChest = sgAuto.add(new BoolSetting.Builder()
-        .name("使用末影箱补给")
+        .name("use-ender-chest")
         .description("背包没有火箭/经验瓶时，落地放下末影箱去拿；有精准采集镐会收回末影箱")
         .defaultValue(true).build());
 
     private final Setting<Integer> supplySlot = sgAuto.add(new IntSetting.Builder()
-        .name("周转用快捷栏格")
+        .name("supply-hotbar-slot")
         .description("临时周转用的快捷栏格子（1-9），里面的东西可能被换走，请留空")
         .defaultValue(9).min(1).max(9).build());
 
     private final Setting<Integer> rocketSlot = sgAuto.add(new IntSetting.Builder()
-        .name("火箭固定快捷栏格")
+        .name("rocket-hotbar-slot")
         .description("火箭固定放这个快捷栏格子（1-9），不占副手，副手留给你自己放的图腾等物品")
         .defaultValue(8).min(1).max(9).build());
 
     private final Setting<Double> minSpeed = sgAuto.add(new DoubleSetting.Builder()
-        .name("最低速度")
+        .name("min-speed")
         .description("速度（格/tick）低于这个值就放一发火箭")
         .defaultValue(1.0).min(0.5).max(1.4).build());
 
     /* ========== Qmsg酱 推送设置 ========== */
     private final Setting<Boolean> qmEnabled = sgQm.add(new BoolSetting.Builder()
-        .name("启用QQ推送")
+        .name("qmsg-enabled")
         .description("把扫描结果通过 Qmsg酱 推送到 QQ（一条一条发，发过的不再发）")
         .defaultValue(false)
         .build());
 
     private final Setting<String> qmKey = sgQm.add(new StringSetting.Builder()
-        .name("QmsgKey")
+        .name("qmsg-key")
         .description("Qmsg酱 控制台里的 API Key（不要泄露）")
         .defaultValue("")
         .build());
 
     private final Setting<Integer> qmInterval = sgQm.add(new IntSetting.Builder()
-        .name("推送间隔秒数")
+        .name("qmsg-interval-seconds")
         .description("两条消息之间的间隔（秒）。Qmsg酱要求同一 Key 至少间隔 5 秒，每天最多 500 条")
         .defaultValue(15)
         .min(5)
@@ -322,13 +322,13 @@ public class SatelliteScanner extends Module {
         .build());
 
     private final Setting<String> qmGroup = sgQm.add(new StringSetting.Builder()
-        .name("QQ群号")
+        .name("qmsg-group")
         .description("目标QQ群号，留空则发到你的QQ单聊（群需先在Qmsg酱控制台绑定）")
         .defaultValue("")
         .build());
 
     private final Setting<String> qmHost = sgQm.add(new StringSetting.Builder()
-        .name("接口域名")
+        .name("qmsg-host")
         .description("接口域名，默认官方地址")
         .defaultValue("https://qmsg.zendee.cn")
         .build());
