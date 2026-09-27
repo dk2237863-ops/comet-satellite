@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "addon-template",
+  "id": "Satellite Scanner",
   "version": "${version}",
-  "name": "Addon Template",
-  "description": "An addon template for Meteor Client addons.",
+  "name": "Satellite Scanner",
+  "description": "An addon for base searching.",
   "authors": [
-    "seasnail"
+    "Xin2Fan"
   ],
   "contact": {
     "sources": "https://github.com/MeteorDevelopment/meteor-addon-template"
