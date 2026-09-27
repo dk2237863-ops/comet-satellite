@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "Satellite Scanner",
+  "id": "satellite-scanner",
   "version": "${version}",
-  "name": "Satellite Scanner",
+  "name": "satellite-scanner",
   "description": "An addon for base searching.",
   "authors": [
     "Xin2Fan"
