@@ -67,6 +67,11 @@ public class LitematicaBuilder extends Module {
         .description("放方块的最大距离（格），跟服务器的交互距离限制保持一致，别调太大")
         .defaultValue(4.3).min(2.0).max(6.0).build());
 
+    private final Setting<Boolean> creativeAutoSupply = sg.add(new BoolSetting.Builder()
+        .name("creative-auto-supply")
+        .description("创造模式下，背包里没有需要的方块就自动从创造栏拿一组放进快捷栏，不用自己找、也跳过材料核对那一步")
+        .defaultValue(true).build());
+
     /* ===== 状态 ===== */
     private final BaritoneBridge bridge = new BaritoneBridge();
     private boolean cmdRegistered = false;
@@ -169,6 +174,13 @@ public class LitematicaBuilder extends Module {
         LocalPlayer pl = mc.player;
         if (pl == null) {
             info("读到了 %d 个方块，但现在不在游戏里，没法核对背包材料", queue.size());
+            return;
+        }
+
+        boolean creative = isCreative(pl);
+        if (creative && creativeAutoSupply.get()) {
+            info("读到 %d 个方块，需要 %d 种材料。创造模式，缺的会自动从创造栏拿，直接 #lbstart 开始建",
+                queue.size(), needed.size());
             return;
         }
 
@@ -304,6 +316,11 @@ public class LitematicaBuilder extends Module {
 
         int slot = findItemSlot(p, needItem);
         if (slot < 0) {
+            if (isCreative(p) && creativeAutoSupply.get()) {
+                giveCreative(mc, p, needItem);
+                placeCd = 2; // 等服务器把创造栏给的物品同步回来，下个 tick 再找
+                return;
+            }
             building = false;
             info("材料用完了：%s，已停止建造，剩 %d 个方块没放", needItem.getDescription().getString(), queue.size());
             return;
@@ -361,6 +378,20 @@ public class LitematicaBuilder extends Module {
             if (p.getInventory().getItem(i).is(item)) return i;
         }
         return -1;
+    }
+
+    // instabuild 就是创造模式那个"随便拿东西建"的能力标志；生存/冒险模式下是 false
+    private static boolean isCreative(LocalPlayer p) {
+        return p.getAbilities().instabuild;
+    }
+
+    // 固定用快捷栏最后一格（下标 8）临时放要建的方块，跟 buildStep 里换到满组材料时用的格子保持一致
+    private static final int CREATIVE_SLOT = 8;
+
+    private void giveCreative(Minecraft mc, LocalPlayer p, Item item) {
+        ItemStack stack = new ItemStack(item, 64);
+        p.getInventory().setItem(CREATIVE_SLOT, stack);
+        mc.gameMode.handleCreativeModeItemAdd(stack, 36 + CREATIVE_SLOT); // 36+格子号 = 这个槽位在玩家容器里的编号
     }
 
     /* =====================================================================
