@@ -1,5 +1,7 @@
 package com.example.addon.modules;
 
+import net.minecraft.core.BlockPos;
+
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -45,6 +47,25 @@ final class BaritoneBridge {
             Class<?> goalCls = Class.forName("baritone.api.pathing.goals.Goal");
             Object goal = Class.forName("baritone.api.pathing.goals.GoalXZ")
                 .getConstructor(int.class, int.class).newInstance(x, z);
+            Class.forName("baritone.api.process.ICustomGoalProcess")
+                .getMethod("setGoalAndPath", goalCls).invoke(process, goal);
+            return true;
+        } catch (Throwable t) {
+            fail(t);
+            return false;
+        }
+    }
+
+    /** 让 Baritone 走到指定方块坐标附近（三维，用于贴着目标方块放置）。 */
+    boolean goToBlock(BlockPos pos) {
+        try {
+            Object baritone = primary();
+            Object process = Class.forName("baritone.api.IBaritone")
+                .getMethod("getCustomGoalProcess").invoke(baritone);
+            Class<?> goalCls = Class.forName("baritone.api.pathing.goals.Goal");
+            Object goal = Class.forName("baritone.api.pathing.goals.GoalBlock")
+                .getConstructor(int.class, int.class, int.class)
+                .newInstance(pos.getX(), pos.getY(), pos.getZ());
             Class.forName("baritone.api.process.ICustomGoalProcess")
                 .getMethod("setGoalAndPath", goalCls).invoke(process, goal);
             return true;
