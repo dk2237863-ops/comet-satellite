@@ -14,7 +14,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.*;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -192,7 +192,7 @@ public class LitematicaBuilder extends Module {
             haveAll += Math.min(have, e.getValue());
             if (have < e.getValue()) {
                 if (missing.length() > 0) missing.append("，");
-                missing.append(e.getKey().getDescription().getString())
+                missing.append(itemLabel(e.getKey()))
                     .append(" 还差 ").append(e.getValue() - have);
             }
         }
@@ -322,7 +322,7 @@ public class LitematicaBuilder extends Module {
                 return;
             }
             building = false;
-            info("材料用完了：%s，已停止建造，剩 %d 个方块没放", needItem.getDescription().getString(), queue.size());
+            info("材料用完了：%s，已停止建造，剩 %d 个方块没放", itemLabel(needItem), queue.size());
             return;
         }
         if (slot >= 9) {
@@ -348,7 +348,7 @@ public class LitematicaBuilder extends Module {
         for (Direction d : Direction.values()) {
             BlockPos neighbor = target.relative(d);
             BlockState ns = w.getBlockState(neighbor);
-            if (ns.isAir() || !ns.isSolidRender(w, neighbor)) continue;
+            if (ns.isAir() || !ns.isSolidRender()) continue;
             Vec3 hitPoint = Vec3.atCenterOf(neighbor).relative(d.getOpposite(), 0.5);
             return new BlockHitResult(hitPoint, d.getOpposite(), neighbor, false);
         }
@@ -362,6 +362,13 @@ public class LitematicaBuilder extends Module {
         float yaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90);
         float pitch = (float) -Math.toDegrees(Math.atan2(dy, dist));
         return new float[]{yaw, pitch};
+    }
+
+    // 显示用的物品名：直接用注册表 id（比如 "oak_planks"），不依赖 Item 上那个
+    // 在不同大版本之间改了好几次名字的"取显示用 Component"方法，更稳
+    private static String itemLabel(Item item) {
+        var key = BuiltInRegistries.ITEM.getKey(item);
+        return key == null ? item.toString() : key.getPath();
     }
 
     private static int countItem(LocalPlayer p, Item item) {
@@ -411,25 +418,25 @@ public class LitematicaBuilder extends Module {
             root = NbtIo.readCompressed(in, NbtAccounter.unlimitedHeap());
         }
 
-        CompoundTag regions = root.getCompound("Regions");
+        CompoundTag regions = root.getCompoundOrEmpty("Regions");
         List<Plan> result = new ArrayList<>();
 
-        for (String regionName : regions.getAllKeys()) {
-            CompoundTag region = regions.getCompound(regionName);
+        for (String regionName : regions.keySet()) {
+            CompoundTag region = regions.getCompoundOrEmpty(regionName);
 
-            CompoundTag posTag = region.getCompound("Position");
-            int px = posTag.getInt("x"), py = posTag.getInt("y"), pz = posTag.getInt("z");
+            CompoundTag posTag = region.getCompoundOrEmpty("Position");
+            int px = posTag.getIntOr("x", 0), py = posTag.getIntOr("y", 0), pz = posTag.getIntOr("z", 0);
 
-            CompoundTag sizeTag = region.getCompound("Size");
-            int sx = sizeTag.getInt("x"), sy = sizeTag.getInt("y"), sz = sizeTag.getInt("z");
+            CompoundTag sizeTag = region.getCompoundOrEmpty("Size");
+            int sx = sizeTag.getIntOr("x", 0), sy = sizeTag.getIntOr("y", 0), sz = sizeTag.getIntOr("z", 0);
 
             int absX = Math.abs(sx), absY = Math.abs(sy), absZ = Math.abs(sz);
             int startX = sx >= 0 ? px : px + sx + 1;
             int startY = sy >= 0 ? py : py + sy + 1;
             int startZ = sz >= 0 ? pz : pz + sz + 1;
 
-            List<BlockState> palette = decodePalette(region.getList("BlockStatePalette", Tag.TAG_COMPOUND));
-            long[] packed = region.getLongArray("BlockStates");
+            List<BlockState> palette = decodePalette(region.getListOrEmpty("BlockStatePalette"));
+            long[] packed = region.getLongArray("BlockStates").orElse(new long[0]);
             int bitsPerEntry = Math.max(2, 32 - Integer.numberOfLeadingZeros(Math.max(1, palette.size() - 1)));
 
             long totalEntries = (long) absX * absY * absZ;
@@ -458,18 +465,18 @@ public class LitematicaBuilder extends Module {
     private List<BlockState> decodePalette(ListTag paletteList) {
         List<BlockState> out = new ArrayList<>(paletteList.size());
         for (int i = 0; i < paletteList.size(); i++) {
-            CompoundTag entry = paletteList.getCompound(i);
-            String name = entry.getString("Name");
-            ResourceLocation id = ResourceLocation.tryParse(name);
+            CompoundTag entry = paletteList.getCompoundOrEmpty(i);
+            String name = entry.getStringOr("Name", "");
+            Identifier id = Identifier.tryParse(name);
             Block block = id == null ? Blocks.AIR : BuiltInRegistries.BLOCK.get(id);
             BlockState state = block.defaultBlockState();
 
-            if (entry.contains("Properties", Tag.TAG_COMPOUND)) {
-                CompoundTag props = entry.getCompound("Properties");
-                for (String key : props.getAllKeys()) {
+            if (entry.contains("Properties")) {
+                CompoundTag props = entry.getCompoundOrEmpty("Properties");
+                for (String key : props.keySet()) {
                     Property<?> prop = state.getBlock().getStateDefinition().getProperty(key);
                     if (prop == null) continue;
-                    state = applyProperty(state, prop, props.getString(key));
+                    state = applyProperty(state, prop, props.getStringOr(key, ""));
                 }
             }
             out.add(state);
