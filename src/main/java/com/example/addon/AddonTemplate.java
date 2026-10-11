@@ -4,6 +4,7 @@ import com.example.addon.commands.CommandExample;
 import com.example.addon.hud.HudExample;
 import com.example.addon.modules.ModuleExample;
 import com.example.addon.modules.SatelliteScanner;
+import com.example.addon.modules.LitematicaBuilder;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
@@ -26,6 +27,7 @@ public class AddonTemplate extends MeteorAddon {
         // Modules
         Modules.get().add(new ModuleExample());
         Modules.get().add(new SatelliteScanner());
+        Modules.get().add(new LitematicaBuilder());
 
         // Commands
         Commands.add(new CommandExample());
