@@ -468,7 +468,11 @@ public class LitematicaBuilder extends Module {
             CompoundTag entry = paletteList.getCompoundOrEmpty(i);
             String name = entry.getStringOr("Name", "");
             Identifier id = Identifier.tryParse(name);
-            Block block = id == null ? Blocks.AIR : BuiltInRegistries.BLOCK.get(id);
+            Block block = Blocks.AIR;
+            if (id != null) {
+                var ref = BuiltInRegistries.BLOCK.get(id); // Optional<Holder.Reference<Block>>
+                if (ref.isPresent()) block = ref.get().value();
+            }
             BlockState state = block.defaultBlockState();
 
             if (entry.contains("Properties")) {
