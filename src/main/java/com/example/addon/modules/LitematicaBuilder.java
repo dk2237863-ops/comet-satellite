@@ -14,7 +14,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.*;
-import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -29,22 +29,26 @@ import net.minecraft.world.phys.Vec3;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.function.Consumer;
 
 /**
  * 读一个 .litematic 文件，核对背包材料够不够，不够就报缺多少然后不开工；
  * 材料够的话就按从下到上的顺序自动摆方块。
+ *
+ * 新增：遇到悬空（周围 6 个方向都没有实心方块可以贴靠）的位置，会自己从最近的地面
+ * 或者已经搭好的部分往上搭临时脚手架，垫到能贴着放目标方块为止；整个建筑放完之后，
+ * 再回头把那些脚手架挖掉（“修复地形”），只留下原本该有的结构。
  *
  * 这不是全自动路径规划：装了 Baritone 就会用 Baritone 走到每个目标点附近再放；
  * 没装 Baritone 的话，只会摆你站的位置够得着的方块，摆不到的会一直留在队列里，
  * 需要你自己飞/走过去。
  *
  * litematica 的 NBT 结构、BlockStates 的变长整数打包方式是我照着公开的格式文档写的，
- * 没有真机测试过，如果读出来的方块数量/位置不对，大概率是 decodePalette() 或
- * readBlockStates() 这两个方法的细节需要调。
+ * 没有真机测试过。#lbload 读完之后会把前 10 个方块的坐标打印出来，建议先对照游戏里
+ * 实际的位置确认一下坐标对不对，再 #lbstart。
  */
 public class LitematicaBuilder extends Module {
     private final SettingGroup sg = settings.getDefaultGroup();
+    private final SettingGroup sgScaffold = settings.createGroup("自动搭架/修复地形");
 
     private final Setting<String> filePath = sg.add(new StringSetting.Builder()
         .name("schematic-path")
@@ -72,20 +76,47 @@ public class LitematicaBuilder extends Module {
         .description("创造模式下，背包里没有需要的方块就自动从创造栏拿一组放进快捷栏，不用自己找、也跳过材料核对那一步")
         .defaultValue(true).build());
 
+    private final Setting<Boolean> scaffoldEnabled = sgScaffold.add(new BoolSetting.Builder()
+        .name("auto-scaffold")
+        .description("开：遇到悬空的位置（周围没有实心方块可以贴靠）自动往上搭临时脚手架；关：悬空的位置会一直卡住等你自己先垫东西")
+        .defaultValue(true).build());
+
+    private final Setting<String> scaffoldBlockId = sgScaffold.add(new StringSetting.Builder()
+        .name("scaffold-block")
+        .description("用来搭脚手架的方块（方块 id，比如 minecraft:cobblestone）。背包里没有的话会在这几种里自动试：圆石/泥土/下界岩/石头")
+        .defaultValue("minecraft:cobblestone")
+        .build());
+
+    private final Setting<Integer> maxScaffoldDepth = sgScaffold.add(new IntSetting.Builder()
+        .name("max-scaffold-depth")
+        .description("往下找地面/已搭部分最多找多少格，超过这个还没找到实心方块就放弃这个位置（避免在天空之城下面搭几百格高的柱子）")
+        .defaultValue(60).min(5).max(300).build());
+
+    private final Setting<Boolean> cleanupScaffold = sgScaffold.add(new BoolSetting.Builder()
+        .name("cleanup-scaffold")
+        .description("开：建筑放完之后自动把脚手架挖掉（“修复地形”）；关：脚手架留在原地不管")
+        .defaultValue(true).build());
+
     /* ===== 状态 ===== */
     private final BaritoneBridge bridge = new BaritoneBridge();
     private boolean cmdRegistered = false;
     private int cmdRetryTimer = 0;
 
+    private enum Phase { IDLE, BUILDING, CLEANUP }
+
     private record Plan(BlockPos pos, BlockState state) {}
 
     private final ArrayDeque<Plan> queue = new ArrayDeque<>();
+    private final HashMap<BlockPos, BlockState> planMap = new HashMap<>(); // 坐标 -> 原理图里该放什么，脚手架要避让这些位置
     private final HashMap<Item, Integer> needed = new HashMap<>();
+    private final LinkedHashSet<BlockPos> scaffoldPositions = new LinkedHashSet<>(); // 搭了哪些临时脚手架，收尾要挖掉
     private boolean loaded = false;
-    private boolean building = false;
+    private Phase phase = Phase.IDLE;
     private int placeCd = 0;
     private int stuckTicks = 0;
+    private int noFaceWarnTimer = 0;
     private BlockPos walkTarget = null;
+    private boolean mining = false;
 
     public LitematicaBuilder() {
         super(AddonTemplate.CATEGORY, "litematica-builder", "导入 .litematic 文件，核对材料后自动建造");
@@ -100,16 +131,19 @@ public class LitematicaBuilder extends Module {
 
     @Override
     public void onDeactivate() {
-        building = false;
+        phase = Phase.IDLE;
         if (useBaritoneWalk.get() && bridge.available()) bridge.stop();
     }
 
     private void resetPlan() {
         queue.clear();
+        planMap.clear();
         needed.clear();
+        scaffoldPositions.clear();
         loaded = false;
-        building = false;
+        phase = Phase.IDLE;
         walkTarget = null;
+        mining = false;
     }
 
     /* ========== 指令：#lbload <path> / #lbstart / #lbstop / #lbstatus ========== */
@@ -165,10 +199,19 @@ public class LitematicaBuilder extends Module {
 
         for (Plan p : plan) {
             queue.add(p);
+            planMap.put(p.pos(), p.state());
             Item item = p.state().getBlock().asItem();
             if (item != Blocks.AIR.asItem()) needed.merge(item, 1, Integer::sum);
         }
         loaded = true;
+
+        // 打印前 10 个方块的坐标，方便你对照游戏里实际的位置，确认解析出来的坐标对不对
+        info("坐标预览（前 %d 个，按从下到上排序）：", Math.min(10, plan.size()));
+        int shown = 0;
+        for (Plan p : plan) {
+            if (shown++ >= 10) break;
+            info("  [%d] %s -> %s", shown, p.pos().toShortString(), p.state().getBlock().getDescriptionId());
+        }
 
         Minecraft mc = Minecraft.getInstance();
         LocalPlayer pl = mc.player;
@@ -192,7 +235,7 @@ public class LitematicaBuilder extends Module {
             haveAll += Math.min(have, e.getValue());
             if (have < e.getValue()) {
                 if (missing.length() > 0) missing.append("，");
-                missing.append(itemLabel(e.getKey()))
+                missing.append(e.getKey().getDescription().getString())
                     .append(" 还差 ").append(e.getValue() - have);
             }
         }
@@ -209,19 +252,19 @@ public class LitematicaBuilder extends Module {
     }
 
     private void cmdStart() {
-        if (!loaded || queue.isEmpty()) {
+        if (!loaded || (queue.isEmpty() && scaffoldPositions.isEmpty())) {
             info("还没读取文件，先 #lbload <路径>");
             return;
         }
-        building = true;
+        phase = queue.isEmpty() ? Phase.CLEANUP : Phase.BUILDING;
         stuckTicks = 0;
         info("开始建造，剩余 %d 个方块", queue.size());
     }
 
     private void cmdStop() {
-        building = false;
+        phase = Phase.IDLE;
         if (useBaritoneWalk.get() && bridge.available()) bridge.stop();
-        info("已停止建造，剩余 %d 个方块（#lbstart 可以接着建）", queue.size());
+        info("已停止建造，剩余 %d 个方块、%d 个脚手架（#lbstart 可以接着建）", queue.size(), scaffoldPositions.size());
     }
 
     private void cmdStatus() {
@@ -229,7 +272,8 @@ public class LitematicaBuilder extends Module {
             info("还没读取任何文件");
             return;
         }
-        info("建造%s中：还剩 %d 个方块", building ? "" : "已暂停", queue.size());
+        info("建造%s：阶段=%s，还剩 %d 个方块，脚手架 %d 个",
+            phase == Phase.IDLE ? "已暂停" : "进行中", phase, queue.size(), scaffoldPositions.size());
     }
 
     @EventHandler
@@ -242,20 +286,28 @@ public class LitematicaBuilder extends Module {
             tryRegisterCommands();
         }
 
-        if (!building || queue.isEmpty()) {
-            if (building && queue.isEmpty()) {
-                building = false;
-                info("建造完成！");
-            }
-            return;
-        }
+        if (phase == Phase.IDLE) return;
 
         if (placeCd > 0) {
             placeCd--;
             return;
         }
 
-        buildStep(mc);
+        if (phase == Phase.BUILDING) {
+            if (queue.isEmpty()) {
+                if (cleanupScaffold.get() && !scaffoldPositions.isEmpty()) {
+                    info("主体建造完成，开始清理 %d 个脚手架方块", scaffoldPositions.size());
+                    phase = Phase.CLEANUP;
+                } else {
+                    phase = Phase.IDLE;
+                    info("建造完成！");
+                }
+                return;
+            }
+            buildStep(mc);
+        } else {
+            cleanupStep(mc);
+        }
     }
 
     private void buildStep(Minecraft mc) {
@@ -300,7 +352,22 @@ public class LitematicaBuilder extends Module {
         // 找一个相邻的、已经是实心方块的面，朝那里右键放置
         BlockHitResult hit = findPlacementFace(w, next.pos());
         if (hit == null) {
-            // 周围 6 个方向都还是空的，这个位置暂时没法放（比如悬空结构，等邻居先放）
+            if (scaffoldEnabled.get()) {
+                boolean progressed = scaffoldStep(mc, p, w, next.pos());
+                if (progressed) {
+                    placeCd = placeDelay.get();
+                    return;
+                }
+                // 搭不了（找不到地面、或者方块不够），warn 一下，别无声无息地死循环
+                if (++noFaceWarnTimer >= 60) {
+                    noFaceWarnTimer = 0;
+                    info("[卡住] %s 这个位置周围没有实心方块可以贴靠，自动搭脚手架也失败了（可能是坐标算错了、"
+                        + "悬空太深超过 max-scaffold-depth，或者脚手架方块用完了）", next.pos().toShortString());
+                }
+            } else if (++noFaceWarnTimer >= 60) {
+                noFaceWarnTimer = 0;
+                info("[卡住] %s 这个位置周围没有实心方块可以贴靠（auto-scaffold 关着，不会自动垫）", next.pos().toShortString());
+            }
             queue.poll();
             queue.add(next);
             placeCd = 5;
@@ -314,21 +381,145 @@ public class LitematicaBuilder extends Module {
             return;
         }
 
+        if (!placeItem(mc, p, needItem, hit)) return; // 材料不够之类的问题，placeItem 内部已经处理/报告
+
+        queue.poll();
+        placeCd = placeDelay.get();
+    }
+
+    /* ========== 自动搭脚手架：从目标位置正下方，往最近的实心方块（地面/已搭部分）之间一路垫上去 ==========
+     * 每次调用只垫一格，垫到能贴着放目标方块为止（之后 buildStep 的 findPlacementFace 就能找到了）。
+     * 返回 true 表示这次垫了一格（已经消耗了这个 tick），false 表示没能垫（会被上层记录为失败）。 */
+    private boolean scaffoldStep(Minecraft mc, LocalPlayer p, Level w, BlockPos target) {
+        BlockPos below = target.below();
+
+        // 正下方已经是实心的，说明问题不在“悬空”，是别的原因（不该走到这里，保险起见直接放弃）
+        if (!w.getBlockState(below).isAir()) return false;
+
+        // 从正下方往下找最近的实心方块（地面、已经建好的部分，或者之前搭的脚手架）
+        BlockPos probe = below;
+        int depth = 0;
+        while (w.getBlockState(probe).isAir() && depth < maxScaffoldDepth.get()) {
+            probe = probe.below();
+            depth++;
+        }
+        if (depth >= maxScaffoldDepth.get()) return false; // 太深了，可能是悬空在半空中或者坐标算错了
+
+        BlockPos placeAt = probe.above();
+
+        // 这个位置本来就是原理图里需要的方块，就直接放该放的东西（它自己也能当支撑），不用额外搭脚手架
+        BlockState planned = planMap.get(placeAt);
+        Item item;
+        boolean isRealBlock;
+        if (planned != null && !planned.isAir()) {
+            item = planned.getBlock().asItem();
+            isRealBlock = true;
+        } else {
+            item = findScaffoldItem(p);
+            if (item == null) return false; // 没有能当脚手架用的方块了
+            isRealBlock = false;
+        }
+
+        BlockHitResult hit = findPlacementFace(w, placeAt);
+        if (hit == null) return false; // probe 应该是实心的，理论上找得到；找不到就放弃，避免死循环
+
+        if (!placeItem(mc, p, item, hit)) return false;
+
+        if (!isRealBlock) {
+            scaffoldPositions.add(placeAt);
+        } else {
+            // 碰巧是原理图自己的方块：它已经放上去了，不用再在主队列里重复放一次
+            queue.removeIf(pl -> pl.pos().equals(placeAt));
+        }
+        return true;
+    }
+
+    // 挑一个背包里有、能当脚手架用的方块：优先用设置里指定的，没有就在几种常见方块里试
+    private Item findScaffoldItem(LocalPlayer p) {
+        List<String> candidates = new ArrayList<>();
+        candidates.add(scaffoldBlockId.get());
+        candidates.add("minecraft:cobblestone");
+        candidates.add("minecraft:dirt");
+        candidates.add("minecraft:netherrack");
+        candidates.add("minecraft:stone");
+        for (String id : candidates) {
+            ResourceLocation rl = ResourceLocation.tryParse(id);
+            if (rl == null) continue;
+            Block b = BuiltInRegistries.BLOCK.get(rl);
+            if (b == Blocks.AIR) continue;
+            Item item = b.asItem();
+            if (isCreative(p) && creativeAutoSupply.get()) return item; // 创造模式反正能自己拿
+            if (findItemSlot(p, item) >= 0) return item;
+        }
+        return null;
+    }
+
+    /* ========== 收尾：把脚手架挖掉（“修复地形”） ========== */
+    private void cleanupStep(Minecraft mc) {
+        LocalPlayer p = mc.player;
+        Level w = mc.level;
+
+        if (scaffoldPositions.isEmpty()) {
+            phase = Phase.IDLE;
+            info("脚手架清理完成，建造全部结束！");
+            return;
+        }
+
+        BlockPos pos = scaffoldPositions.iterator().next();
+        if (w.getBlockState(pos).isAir()) {
+            scaffoldPositions.remove(pos);
+            mining = false;
+            placeCd = 1;
+            return;
+        }
+
+        double dist = p.position().distanceTo(Vec3.atCenterOf(pos));
+        if (dist > reach.get()) {
+            if (useBaritoneWalk.get() && bridge.available()) {
+                bridge.goToBlock(pos);
+            }
+            placeCd = 5;
+            return;
+        }
+
+        float[] look = lookAt(p, Vec3.atCenterOf(pos));
+        p.setYRot(look[0]);
+        p.setXRot(look[1]);
+
+        if (isCreative(p)) {
+            mc.gameMode.destroyBlock(pos);
+            scaffoldPositions.remove(pos);
+            placeCd = 1;
+            return;
+        }
+
+        if (!mining) {
+            mc.gameMode.startDestroyBlock(pos, Direction.UP);
+            mining = true;
+        } else {
+            mc.gameMode.continueDestroyBlock(pos, Direction.UP);
+        }
+        p.swing(InteractionHand.MAIN_HAND);
+    }
+
+    /* ========== 放置一个方块：切到对应物品、转头看过去、右键放置 ==========
+     * 返回 true 表示放置动作已经发出去了；false 表示材料不够（创造模式之外）或者物品正在换格子的中间状态。 */
+    private boolean placeItem(Minecraft mc, LocalPlayer p, Item needItem, BlockHitResult hit) {
         int slot = findItemSlot(p, needItem);
         if (slot < 0) {
             if (isCreative(p) && creativeAutoSupply.get()) {
                 giveCreative(mc, p, needItem);
                 placeCd = 2; // 等服务器把创造栏给的物品同步回来，下个 tick 再找
-                return;
+                return false;
             }
-            building = false;
-            info("材料用完了：%s，已停止建造，剩 %d 个方块没放", itemLabel(needItem), queue.size());
-            return;
+            phase = Phase.IDLE;
+            info("材料用完了：%s，已停止建造，剩 %d 个方块没放", needItem.getDescription().getString(), queue.size());
+            return false;
         }
         if (slot >= 9) {
             InvUtils.move().from(slot).toHotbar(8);
             placeCd = 2;
-            return;
+            return false;
         }
         InvUtils.swap(slot, false);
 
@@ -338,19 +529,21 @@ public class LitematicaBuilder extends Module {
 
         mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND, hit);
         p.swing(InteractionHand.MAIN_HAND);
-
-        queue.poll();
-        placeCd = placeDelay.get();
+        return true;
     }
 
-    // 在目标位置周围 6 个方向找一个已经是实心方块的邻居，对着那个面右键
+    // 在目标位置周围 6 个方向找一个已经是实心方块的邻居，对着那个面右键。
+    // 注意：Vec3 没有 relative(Direction, double) 这个方法（那是 BlockPos/Vec3i 才有的），
+    // 这里改成手动按方向的单位向量加偏移。
     private static BlockHitResult findPlacementFace(Level w, BlockPos target) {
         for (Direction d : Direction.values()) {
             BlockPos neighbor = target.relative(d);
             BlockState ns = w.getBlockState(neighbor);
-            if (ns.isAir() || !ns.isSolidRender()) continue;
-            Vec3 hitPoint = Vec3.atCenterOf(neighbor).relative(d.getOpposite(), 0.5);
-            return new BlockHitResult(hitPoint, d.getOpposite(), neighbor, false);
+            if (ns.isAir() || !ns.isSolidRender(w, neighbor)) continue;
+            Direction opp = d.getOpposite();
+            Vec3 hitPoint = Vec3.atCenterOf(neighbor).add(
+                opp.getStepX() * 0.5, opp.getStepY() * 0.5, opp.getStepZ() * 0.5);
+            return new BlockHitResult(hitPoint, opp, neighbor, false);
         }
         return null;
     }
@@ -362,13 +555,6 @@ public class LitematicaBuilder extends Module {
         float yaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90);
         float pitch = (float) -Math.toDegrees(Math.atan2(dy, dist));
         return new float[]{yaw, pitch};
-    }
-
-    // 显示用的物品名：直接用注册表 id（比如 "oak_planks"），不依赖 Item 上那个
-    // 在不同大版本之间改了好几次名字的"取显示用 Component"方法，更稳
-    private static String itemLabel(Item item) {
-        var key = BuiltInRegistries.ITEM.getKey(item);
-        return key == null ? item.toString() : key.getPath();
     }
 
     private static int countItem(LocalPlayer p, Item item) {
@@ -392,7 +578,7 @@ public class LitematicaBuilder extends Module {
         return p.getAbilities().instabuild;
     }
 
-    // 固定用快捷栏最后一格（下标 8）临时放要建的方块，跟 buildStep 里换到满组材料时用的格子保持一致
+    // 固定用快捷栏最后一格（下标 8）临时放要建的方块，跟 placeItem 里换到满组材料时用的格子保持一致
     private static final int CREATIVE_SLOT = 8;
 
     private void giveCreative(Minecraft mc, LocalPlayer p, Item item) {
@@ -410,7 +596,8 @@ public class LitematicaBuilder extends Module {
      *           ├ Size {x,y,z}       区域尺寸，可以是负数（表示往反方向延伸）
      *           ├ BlockStatePalette  方块状态调色板（列表，每项是 Name + 可选 Properties）
      *           └ BlockStates        long[]，按调色板下标打包存的方块数组
-     *  这部分我没有真机验证过，读出来不对大概率是这两个方法要调。
+     *  这部分我没有真机验证过，读出来不对大概率是这两个方法要调——#lbload 之后会打印前 10
+     *  个坐标，建议先核对一下。
      * ===================================================================== */
     private List<Plan> readLitematic(Path path) throws IOException {
         CompoundTag root;
@@ -418,25 +605,25 @@ public class LitematicaBuilder extends Module {
             root = NbtIo.readCompressed(in, NbtAccounter.unlimitedHeap());
         }
 
-        CompoundTag regions = root.getCompoundOrEmpty("Regions");
+        CompoundTag regions = root.getCompound("Regions");
         List<Plan> result = new ArrayList<>();
 
-        for (String regionName : regions.keySet()) {
-            CompoundTag region = regions.getCompoundOrEmpty(regionName);
+        for (String regionName : regions.getAllKeys()) {
+            CompoundTag region = regions.getCompound(regionName);
 
-            CompoundTag posTag = region.getCompoundOrEmpty("Position");
-            int px = posTag.getIntOr("x", 0), py = posTag.getIntOr("y", 0), pz = posTag.getIntOr("z", 0);
+            CompoundTag posTag = region.getCompound("Position");
+            int px = posTag.getInt("x"), py = posTag.getInt("y"), pz = posTag.getInt("z");
 
-            CompoundTag sizeTag = region.getCompoundOrEmpty("Size");
-            int sx = sizeTag.getIntOr("x", 0), sy = sizeTag.getIntOr("y", 0), sz = sizeTag.getIntOr("z", 0);
+            CompoundTag sizeTag = region.getCompound("Size");
+            int sx = sizeTag.getInt("x"), sy = sizeTag.getInt("y"), sz = sizeTag.getInt("z");
 
             int absX = Math.abs(sx), absY = Math.abs(sy), absZ = Math.abs(sz);
             int startX = sx >= 0 ? px : px + sx + 1;
             int startY = sy >= 0 ? py : py + sy + 1;
             int startZ = sz >= 0 ? pz : pz + sz + 1;
 
-            List<BlockState> palette = decodePalette(region.getListOrEmpty("BlockStatePalette"));
-            long[] packed = region.getLongArray("BlockStates").orElse(new long[0]);
+            List<BlockState> palette = decodePalette(region.getList("BlockStatePalette", Tag.TAG_COMPOUND));
+            long[] packed = region.getLongArray("BlockStates");
             int bitsPerEntry = Math.max(2, 32 - Integer.numberOfLeadingZeros(Math.max(1, palette.size() - 1)));
 
             long totalEntries = (long) absX * absY * absZ;
@@ -465,22 +652,18 @@ public class LitematicaBuilder extends Module {
     private List<BlockState> decodePalette(ListTag paletteList) {
         List<BlockState> out = new ArrayList<>(paletteList.size());
         for (int i = 0; i < paletteList.size(); i++) {
-            CompoundTag entry = paletteList.getCompoundOrEmpty(i);
-            String name = entry.getStringOr("Name", "");
-            Identifier id = Identifier.tryParse(name);
-            Block block = Blocks.AIR;
-            if (id != null) {
-                var ref = BuiltInRegistries.BLOCK.get(id); // Optional<Holder.Reference<Block>>
-                if (ref.isPresent()) block = ref.get().value();
-            }
+            CompoundTag entry = paletteList.getCompound(i);
+            String name = entry.getString("Name");
+            ResourceLocation id = ResourceLocation.tryParse(name);
+            Block block = id == null ? Blocks.AIR : BuiltInRegistries.BLOCK.get(id);
             BlockState state = block.defaultBlockState();
 
-            if (entry.contains("Properties")) {
-                CompoundTag props = entry.getCompoundOrEmpty("Properties");
-                for (String key : props.keySet()) {
+            if (entry.contains("Properties", Tag.TAG_COMPOUND)) {
+                CompoundTag props = entry.getCompound("Properties");
+                for (String key : props.getAllKeys()) {
                     Property<?> prop = state.getBlock().getStateDefinition().getProperty(key);
                     if (prop == null) continue;
-                    state = applyProperty(state, prop, props.getStringOr(key, ""));
+                    state = applyProperty(state, prop, props.getString(key));
                 }
             }
             out.add(state);
