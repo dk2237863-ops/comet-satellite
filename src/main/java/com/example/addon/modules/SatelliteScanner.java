@@ -13,6 +13,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.ShulkerBoxBlock;
 import net.minecraft.world.level.block.entity.BarrelBlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.ChestBlockEntity;
@@ -50,7 +51,7 @@ import net.minecraft.tags.ItemTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.inventory.ChestMenu;
+import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -282,8 +283,13 @@ public class SatelliteScanner extends Module {
 
     private final Setting<Boolean> useChest = sgAuto.add(new BoolSetting.Builder()
         .name("use-ender-chest")
-        .description("背包没有火箭/经验瓶时，落地放下末影箱去拿；有精准采集镐会收回末影箱")
+        .description("背包没有火箭/经验瓶时，落地放下末影箱去拿。末影箱里如果是潜影盒装的火箭/经验瓶，会把潜影盒拿出来放地上取东西，挖回来后再放回末影箱；最后用精准采集镐收回末影箱。背包里本来就有的其他潜影盒不会被动")
         .defaultValue(true).build());
+
+    private final Setting<Boolean> logoutIfChestLost = sgAuto.add(new BoolSetting.Builder()
+        .name("logout-if-enderchest-lost")
+        .description("补给完挖末影箱后，10 秒内背包里没出现末影箱（没收回来，或者没有精准采集镐）时：开=自动下线；关=不下线，继续飞（末影箱留在地上）。潜影盒挖掉后 10 秒没回到背包则不管这个设置，一律自动下线")
+        .defaultValue(false).build());
 
     private final Setting<Integer> supplySlot = sgAuto.add(new IntSetting.Builder()
         .name("supply-hotbar-slot")
@@ -433,9 +439,9 @@ public class SatelliteScanner extends Module {
         if (qmEnabled.get()) {
             qmLines.add("已启动 " + timeStr() + "，推送正常时会收到这条消息");
         }
-        info("[配置确认] 低空地形跟随=%s 悬停高度=%d 爬升前瞻=%d 爬升容错=%d 固定巡航高度=%d 严格标记规则=%s",
+        info("[配置确认] 低空地形跟随=%s 悬停高度=%d 爬升前瞻=%d 爬升容错=%d 固定巡航高度=%d 严格标记规则=%s 末影箱没收回就下线=%s",
             lowFlight.get(), hoverHeight.get(), climbLookahead.get(), climbTolerance.get(), cruiseAltitude.get(),
-            strictMarker.get());
+            strictMarker.get(), logoutIfChestLost.get());
     }
 
     @Override
@@ -521,6 +527,7 @@ public class SatelliteScanner extends Module {
         pilot.rocketSlot = rocketSlot.get() - 1;
         pilot.minSpeed = minSpeed.get();
         pilot.useChest = useChest.get();
+        pilot.logoutIfChestLost = logoutIfChestLost.get();
         pilot.lowFlight = lowFlight.get();
         pilot.hoverHeight = hoverHeight.get();
         pilot.climbLookahead = climbLookahead.get();
@@ -1491,9 +1498,11 @@ public class SatelliteScanner extends Module {
  * 鞘翅自动驾驶：起飞 -> 在固定高度或地形跟随低飞沿航线巡航 -> 降落。
  * 支持暂停/继续：暂停时把飞行控制权交还给玩家（可以自己随便飞），继续时从暂停的航点接管飞行，
  * 飞回原来的航线继续扫同一片区域；暂停期间不会清空已经扫到的数据，恢复后不会重复上报。
- * 补给流程：耐久低 / 火箭少 -> 降落 -> 背包里拿经验瓶修补、拿火箭 -> 背包没有就放末影箱去拿 -> 还是没有就（落地后）下线。
+ * 补给流程：耐久低 / 火箭少 -> 降落 -> 背包里拿经验瓶修补、拿火箭 -> 背包没有就放末影箱去拿
+ * （末影箱里的潜影盒会拿出来放地上取东西，挖回来、10 秒内确认回到背包后放回末影箱，再收回末影箱）
+ * -> 还是没有就（落地后）下线。
  * 火箭固定放在 rocketSlot 这个快捷栏格子，不占副手；副手留给你自己放的图腾（脚本会自动把背包里的图腾放进副手，
- * 但从不会把它换走）。经验瓶/末影箱/镐临时用 supplySlot 这个快捷栏格子。
+ * 但从不会把它换走）。经验瓶/末影箱/镐/潜影盒临时用 supplySlot 这个快捷栏格子。
  */
 private static final class ElytraPilot {
     private enum Mode { IDLE, PREP, TAKEOFF, CRUISE, LAND, REPAIR, CHEST, PAUSED }
@@ -1503,10 +1512,11 @@ private static final class ElytraPilot {
     int minRockets = 6;
     int landBelow = 80;      // 鞘翅剩余耐久 <= 这个值就降落修补
     int repairPct = 90;      // 修到多少 %
-    int supplySlot = 8;      // 快捷栏下标 0~8（临时周转：经验瓶/末影箱/镐）
+    int supplySlot = 8;      // 快捷栏下标 0~8（临时周转：经验瓶/末影箱/镐/潜影盒）
     int rocketSlot = 7;      // 快捷栏下标 0~8（固定放火箭，不占副手）
     double minSpeed = 1.0;   // 格/tick，低于就放火箭
     boolean useChest = true;
+    boolean logoutIfChestLost = false; // 末影箱挖掉后 10 秒没回到背包：true=下线，false=不下线继续飞
     boolean lowFlight = false;  // 开：地形跟随低飞；关：固定 altitude 高空巡航
     int hoverHeight = 30;       // 低飞模式：目标高度 = 前方地形最高点 + 这个值
     int climbLookahead = 30;    // 低飞模式：往飞行方向看多远来判断要不要提前爬升
@@ -1514,6 +1524,26 @@ private static final class ElytraPilot {
 
     private static final int ARRIVE_DIST = 40;
     private static final int ROCKET_GAP = 15;
+
+    /* ===== 末影箱补给的步骤编号 ===== */
+    private static final int CS_AIM = 0;          // 找空位、转头
+    private static final int CS_HOLD = 1;         // 把末影箱拿到手上
+    private static final int CS_PLACE = 2;        // 放下末影箱
+    private static final int CS_OPEN = 3;         // 打开末影箱
+    private static final int CS_SESSION = 4;      // 末影箱已打开：放回潜影盒 / 拿火箭经验瓶 / 拿下一个潜影盒
+    private static final int CS_SETTLE = 5;       // 关掉末影箱后等一会儿，确认潜影盒真的拿出来了
+    private static final int CS_BOX_PLACE = 6;    // 把潜影盒放到地上
+    private static final int CS_BOX_OPEN = 7;     // 打开潜影盒
+    private static final int CS_BOX_TAKE = 8;     // 从潜影盒里拿火箭/经验瓶
+    private static final int CS_BOX_MINE = 9;     // 挖回潜影盒
+    private static final int CS_BOX_CHECK = 10;   // 最多等 10 秒，确认潜影盒回到背包
+    private static final int CS_CHEST_MINE = 11;  // 用精准采集镐挖末影箱
+    private static final int CS_CHEST_CHECK = 12; // 最多等 10 秒，确认末影箱回到背包
+
+    private static final int CHECK_TICKS = 200;    // 10 秒
+    private static final int OPEN_SYNC_TICKS = 6;  // 刚打开容器时，等格子内容同步过来再动手
+    private static final int ENOUGH_ROCKETS = 128; // 背包里火箭够这个数，就不再翻后面的潜影盒
+    private static final int MAX_BOX_ROUNDS = 6;   // 一次补给最多处理几个潜影盒，防止死循环
 
     private final Consumer<String> say;
     private final Consumer<String> qq;
@@ -1531,11 +1561,15 @@ private static final class ElytraPilot {
 
     // 起飞
     private int tk, tkWait, tkTicks;
-    // 末影箱
+    // 末影箱补给
     private int cs, csWait, csTries, takePass, mineTicks, pickWait;
-    private int chestPreCount;
-    private boolean mining;
-    private BlockPos chestPos;
+    private int chestPreCount;   // 末影箱放下后背包里的末影箱数量，挖回来之后应该 +1
+    private int boxBaseline;     // 补给开始前背包里本来就有的潜影盒数量
+    private int boxBefore;       // 放下某个潜影盒之前，背包里的潜影盒数量（挖回来之后应该恢复到这个数）
+    private int boxScanFrom;     // 末影箱里从第几格开始找下一个潜影盒（已经处理过的排除掉）
+    private int boxRounds;       // 已经处理了几个潜影盒
+    private boolean mining, chestPlaced, tookBox;
+    private BlockPos chestPos, boxPos;
 
     ElytraPilot(Consumer<String> say, Consumer<String> qq, Consumer<String> qqUrgent, Consumer<Boolean> onEnd) {
         this.say = say;
@@ -1658,7 +1692,7 @@ private static final class ElytraPilot {
                 say(String.format(Locale.ROOT, "开始用经验瓶修补鞘翅：%d/%d", left, max));
                 return;
             } else if (useChest && !triedChest) {
-                startChest();
+                startChest(p);
                 return;
             } else if (left <= landBelow + 10) {
                 logout(mc, "没有经验瓶，鞘翅耐久只剩 " + left);
@@ -1671,7 +1705,7 @@ private static final class ElytraPilot {
         int rockets = count(p, Items.FIREWORK_ROCKET);
         if (rockets < minRockets) {
             if (useChest && !triedChest) {
-                startChest();
+                startChest(p);
                 return;
             }
             logout(mc, "火箭不足（背包和末影箱都没有），当前 " + rockets);
@@ -1941,88 +1975,143 @@ private static final class ElytraPilot {
     }
 
     /* ========== 末影箱补给 ==========
-     * 转头对准 -> 把末影箱拿到手上 -> 放在地上 -> 转头看它、打开 -> 一件一件把火箭/经验瓶/潜影盒
-     * 拖到背包空位（不再用批量 shift 点击，改用这份代码里已经验证能正常工作的“拖动到指定格子”方式）
-     * -> 挖掉末影箱 -> 确认末影箱真的回到了背包。如果没能确认拿回来，直接强制下线，
-     * 避免把末影箱和里面的东西丢在没人看守的地方。 */
-    private void startChest() {
+     * 整体流程（每一步都有超时，失败要么退回地面决策，要么按规则下线）：
+     *  1. 转头对准空位 -> 把末影箱拿到手上 -> 放在地上 -> 转头看着它、打开
+     *  2. 末影箱打开后：先把上一轮处理完的潜影盒放回去，再拿散放的火箭/经验瓶；
+     *     火箭还不够的话，再拿出一个潜影盒（每次只拿一个，按格子顺序往后翻），然后关掉末影箱
+     *  3. 拿出来的潜影盒：放到地上 -> 打开 -> 把火箭/经验瓶拿出来 -> 挖回来，
+     *     最多等 10 秒确认回到背包；10 秒内没回来 = 强制下线（里面的东西不能丢）
+     *  4. 回到第 2 步，把潜影盒放回末影箱；不需要再翻潜影盒了就关掉末影箱
+     *  5. 用精准采集镐挖掉末影箱，最多等 10 秒确认回到背包，回来了就继续起飞；
+     *     没回来则看 logout-if-enderchest-lost：开=强制下线，关=不下线继续飞
+     *
+     * 从容器里"拿东西"一律用 InvUtils.shiftClick().slotId(容器里的格子号)。
+     * 注意 InvUtils.move().from(n) 里的 n 是玩家背包下标，不是容器格子号，不能拿来点容器里的格子。
+     * 另外刚打开容器的头几个 tick 里格子内容还没同步，必须先等一等再判断"里面有没有东西"。 */
+    private void startChest(LocalPlayer p) {
         triedChest = true;
         mode = Mode.CHEST;
-        cs = 0;
+        cs = CS_AIM;
         csWait = 0;
         csTries = 0;
         takePass = 0;
         mineTicks = 0;
         pickWait = 0;
         mining = false;
+        chestPlaced = false;
+        tookBox = false;
         chestPos = null;
-        chestPreCount = -1;
+        boxPos = null;
+        chestPreCount = 0;
+        boxBefore = 0;
+        boxScanFrom = 0;
+        boxRounds = 0;
+        boxBaseline = countShulkers(p);
         say("去末影箱补给");
         qq.accept("背包物资不足，尝试从末影箱补给");
     }
 
-    // 失败但不严重的情况（还没放下末影箱、还没打开之前）：退回地面决策，不强制下线
+    // 末影箱还没放下之前出的问题：退回地面决策，不强制下线
     private void chestFail(Minecraft mc, String why) {
         if (mc.player != null) mc.player.closeContainer();
         say("末影箱补给失败：" + why);
         mode = Mode.PREP;
     }
 
+    // 末影箱已经放在地上，但后面的步骤出了问题：先想办法把它收回来
+    private void recoverChest(Minecraft mc) {
+        if (mc.player != null) mc.player.closeContainer();
+        cs = CS_CHEST_MINE;
+        mineTicks = 0;
+        mining = false;
+    }
+
+    // 末影箱没能收回来：按设置决定下线还是继续飞
+    private void chestNotRecovered(Minecraft mc, String why) {
+        if (mc.player != null) mc.player.closeContainer();
+        if (logoutIfChestLost) {
+            logout(mc, why);
+        } else {
+            say(why + "（已设置不下线，继续飞行）");
+            qq.accept(why + "，未下线，继续飞行");
+            mode = Mode.PREP;
+        }
+    }
+
+    // 潜影盒没拿到手/放不下：不再处理更多潜影盒，回到末影箱把手里的放回去
+    private void giveUpBoxes(String why) {
+        say(why);
+        boxRounds = MAX_BOX_ROUNDS;
+        cs = CS_OPEN;
+        pickWait = 0;
+        csTries = 0;
+    }
+
     private void chest(Minecraft mc, LocalPlayer p) {
-        if (++csWait > 1000) {
-            // 已经挖了末影箱但超时还没确认收回，这种情况宁可强制下线，不要让末影箱和东西留在原地没人管
-            logout(mc, "末影箱补给超时，无法确认是否收回");
+        if (++csWait > 6000) {
+            // 整体超时：末影箱已经放下的话，宁可强制下线，也不要把末影箱/潜影盒留在原地没人管
+            if (chestPlaced) logout(mc, "末影箱补给整体超时，末影箱或潜影盒可能没收回");
+            else chestFail(mc, "超时");
             return;
         }
+        Level w = mc.level;
+
         switch (cs) {
-            case 0 -> {
-                // 第一步：转头对准准备放置的位置
+            case CS_AIM -> {
                 int s = firstSlot(p, Items.ENDER_CHEST);
                 if (s < 0) {
                     chestFail(mc, "背包里没有末影箱");
                     return;
                 }
-                chestPos = pickSite(mc.level, p);
+                chestPos = pickSite(w, p, null);
                 if (chestPos == null) {
                     chestFail(mc, "周围没有能放末影箱的空位");
                     return;
                 }
                 faceBlock(p, chestPos.below());
                 if (s != supplySlot) InvUtils.move().from(s).toHotbar(supplySlot);
-                cs = 1;
+                csTries = 0;
+                cs = CS_HOLD;
             }
-            case 1 -> {
-                // 第二步：把末影箱拿到手上
+
+            case CS_HOLD -> {
                 faceBlock(p, chestPos.below());
                 InvUtils.swap(supplySlot, false);
                 if (!p.getMainHandItem().is(Items.ENDER_CHEST)) {
                     if (++csTries > 10) chestFail(mc, "末影箱没能拿到手上");
                     return;
                 }
-                cs = 2;
+                csTries = 0;
+                cs = CS_PLACE;
             }
-            case 2 -> {
-                // 第三步：放在地上
+
+            case CS_PLACE -> {
                 BlockPos base = chestPos.below();
                 faceBlock(p, base);
                 mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND,
                     new BlockHitResult(new Vec3(chestPos.getX() + 0.5, chestPos.getY(), chestPos.getZ() + 0.5),
                         Direction.UP, base, false));
                 p.swing(InteractionHand.MAIN_HAND);
-                cs = 3;
+                cs = CS_OPEN;
                 pickWait = 0;
             }
-            case 3 -> {
-                // 第四步：转头看着它、打开
-                if (!mc.level.getBlockState(chestPos).is(Blocks.ENDER_CHEST)) {
+
+            case CS_OPEN -> {
+                if (!w.getBlockState(chestPos).is(Blocks.ENDER_CHEST)) {
                     if (++pickWait > 40) {
+                        pickWait = 0;
                         if (++csTries > 3) chestFail(mc, "放不下末影箱");
-                        else cs = 1;
+                        else cs = CS_HOLD;
                     }
                     return;
                 }
-                if (p.containerMenu instanceof ChestMenu) {
-                    cs = 4;
+                if (!chestPlaced) {
+                    chestPlaced = true;
+                    chestPreCount = count(p, Items.ENDER_CHEST); // 放下之后的数量，挖回来应该 +1
+                }
+                if (isOpen(p)) {
+                    takePass = 0;
+                    cs = CS_SESSION;
                     return;
                 }
                 faceBlock(p, chestPos);
@@ -2030,53 +2119,231 @@ private static final class ElytraPilot {
                     mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND,
                         new BlockHitResult(Vec3.atCenterOf(chestPos), Direction.UP, chestPos, false));
                 }
-                if (pickWait > 100) chestFail(mc, "打不开末影箱");
+                if (pickWait > 100) {
+                    say("打不开末影箱，尝试直接收回");
+                    recoverChest(mc);
+                }
             }
-            case 4 -> {
-                // 第五步：拿火箭/经验瓶/潜影盒。一次只处理一件，拖到背包里找到的第一个空位，
-                // 不用 shift 批量点击（怀疑是这个方法在这份映射下不工作，shiftClick 已经两次没能解决问题）
-                if (!(p.containerMenu instanceof ChestMenu menu)) {
-                    cs = 3;
+
+            case CS_SESSION -> {
+                if (!isOpen(p)) {
+                    pickWait = 0;
+                    cs = CS_OPEN;
                     return;
                 }
-                int total = menu.getRowCount() * 9;
-                int fromSlot = -1;
-                for (int i = 0; i < total; i++) {
-                    ItemStack s = menu.getSlot(i).getItem();
-                    if (s.is(Items.FIREWORK_ROCKET) || s.is(Items.EXPERIENCE_BOTTLE) || s.is(ItemTags.SHULKER_BOXES)) {
-                        fromSlot = i;
-                        break;
+                // 刚打开的头几个 tick 格子内容还没同步，先等一等，不然会误以为里面什么都没有
+                if (++takePass < OPEN_SYNC_TICKS) return;
+
+                AbstractContainerMenu menu = p.containerMenu;
+                int total = menu.slots.size() - 36;
+                boolean stuck = takePass > 80; // 点了这么久还没完成（背包满了之类），别磨了
+
+                // A. 上一轮处理完的潜影盒，放回末影箱
+                if (!stuck && countShulkers(p) > boxBaseline) {
+                    for (int i = 0; i < 36; i++) {
+                        if (p.getInventory().getItem(i).is(ItemTags.SHULKER_BOXES)) {
+                            InvUtils.shiftClick().slotId(playerSlotId(menu, i));
+                            break;
+                        }
+                    }
+                    return;
+                }
+
+                // B. 拿散放在末影箱里的火箭/经验瓶
+                if (!stuck) {
+                    int clicks = 0;
+                    for (int i = 0; i < total && clicks < 3; i++) {
+                        ItemStack s = menu.getSlot(i).getItem();
+                        if (s.is(Items.FIREWORK_ROCKET) || s.is(Items.EXPERIENCE_BOTTLE)) {
+                            InvUtils.shiftClick().slotId(i);
+                            clicks++;
+                        }
+                    }
+                    if (clicks > 0) return;
+                }
+
+                // C. 火箭还不够（或者需要经验瓶但没有）：再拿出一个潜影盒，按格子顺序往后翻
+                tookBox = false;
+                if (!stuck && boxRounds < MAX_BOX_ROUNDS && needMoreSupplies(p)) {
+                    for (int i = boxScanFrom; i < total; i++) {
+                        if (menu.getSlot(i).getItem().is(ItemTags.SHULKER_BOXES)) {
+                            InvUtils.shiftClick().slotId(i);
+                            boxScanFrom = i + 1;
+                            boxRounds++;
+                            tookBox = true;
+                            break;
+                        }
                     }
                 }
-                if (fromSlot < 0 || ++takePass > 60) { // 拿完了，或者尝试次数太多（可能背包满了）
-                    p.closeContainer();
-                    cs = 5;
-                    return;
-                }
-                int emptySlot = firstEmptySlot(p);
-                if (emptySlot < 0) {
-                    // 背包满了，拿不下更多，直接结束拿取
-                    p.closeContainer();
-                    cs = 5;
-                    return;
-                }
-                InvUtils.move().from(fromSlot).to(emptySlot);
+
+                p.closeContainer();
+                pickWait = 0;
+                cs = CS_SETTLE;
             }
-            case 5 -> {
-                // 第六步：挖掉末影箱
-                int before = count(p, Items.ENDER_CHEST);
-                if (chestPreCount < 0) chestPreCount = before;
 
-                if (mc.level.getBlockState(chestPos).isAir()) {
-                    cs = 6;
-                    pickWait = 0;
+            case CS_SETTLE -> {
+                if (++pickWait < 10) return; // 等服务器把刚才的点击同步完
+                if (tookBox) {
+                    if (countShulkers(p) > boxBaseline) {
+                        say("潜影盒已拿出来，放到地上取火箭/经验瓶");
+                        csTries = 0;
+                        cs = CS_BOX_PLACE;
+                    } else {
+                        say("潜影盒没能拿出来（背包满了？），不再处理潜影盒");
+                        recoverChest(mc);
+                    }
+                } else {
+                    recoverChest(mc);
+                }
+            }
+
+            case CS_BOX_PLACE -> {
+                int s = firstShulkerSlot(p);
+                if (s < 0 || countShulkers(p) <= boxBaseline) {
+                    giveUpBoxes("背包里没有可处理的潜影盒了");
                     return;
                 }
+                if (boxPos == null || !w.getBlockState(boxPos).isAir()) {
+                    boxPos = pickSite(w, p, chestPos);
+                    if (boxPos == null) {
+                        giveUpBoxes("周围没有第二块空位放潜影盒，把它放回末影箱");
+                        return;
+                    }
+                }
+                faceBlock(p, boxPos.below());
+                if (s >= 9) {
+                    InvUtils.move().from(s).toHotbar(supplySlot);
+                    return; // 下个 tick 它就在快捷栏里了
+                }
+                InvUtils.swap(s, false);
+                if (!p.getMainHandItem().is(ItemTags.SHULKER_BOXES)) {
+                    if (++csTries > 10) giveUpBoxes("潜影盒没能拿到手上，把它放回末影箱");
+                    return;
+                }
+                boxBefore = countShulkers(p); // 放下之前的数量，挖回来之后应该恢复到这个数
+                mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND,
+                    new BlockHitResult(new Vec3(boxPos.getX() + 0.5, boxPos.getY(), boxPos.getZ() + 0.5),
+                        Direction.UP, boxPos.below(), false));
+                p.swing(InteractionHand.MAIN_HAND);
+                cs = CS_BOX_OPEN;
+                pickWait = 0;
+                csTries = 0;
+            }
 
+            case CS_BOX_OPEN -> {
+                if (!(w.getBlockState(boxPos).getBlock() instanceof ShulkerBoxBlock)) {
+                    if (++pickWait > 40) {
+                        pickWait = 0;
+                        if (++csTries > 3) giveUpBoxes("潜影盒放不下，把它放回末影箱");
+                        else cs = CS_BOX_PLACE;
+                    }
+                    return;
+                }
+                if (isOpen(p)) {
+                    takePass = 0;
+                    csTries = 0;
+                    cs = CS_BOX_TAKE;
+                    return;
+                }
+                faceBlock(p, boxPos);
+                if (++pickWait % 5 == 0) {
+                    mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND,
+                        new BlockHitResult(Vec3.atCenterOf(boxPos), Direction.UP, boxPos, false));
+                }
+                if (pickWait > 100) {
+                    say("打不开潜影盒，直接挖回来");
+                    cs = CS_BOX_MINE;
+                    mineTicks = 0;
+                    mining = false;
+                }
+            }
+
+            case CS_BOX_TAKE -> {
+                if (!isOpen(p)) {
+                    // 容器被意外关掉了：重新打开，反复关就别拿了，直接挖回来
+                    if (++csTries > 5) {
+                        say("潜影盒总是被关掉，直接挖回来");
+                        cs = CS_BOX_MINE;
+                        mineTicks = 0;
+                        mining = false;
+                    } else {
+                        cs = CS_BOX_OPEN;
+                        pickWait = 0;
+                    }
+                    return;
+                }
+                // 刚打开的头几个 tick 格子内容还没同步，先等一等
+                if (++takePass < OPEN_SYNC_TICKS) return;
+
+                AbstractContainerMenu menu = p.containerMenu;
+                int total = menu.slots.size() - 36;
+                int clicks = 0;
+                for (int i = 0; i < total && clicks < 3; i++) {
+                    ItemStack s = menu.getSlot(i).getItem();
+                    if (s.is(Items.FIREWORK_ROCKET) || s.is(Items.EXPERIENCE_BOTTLE)) {
+                        InvUtils.shiftClick().slotId(i);
+                        clicks++;
+                    }
+                }
+                if (clicks == 0 || takePass > 80) { // 拿完了，或者拿了很久还没拿完（背包满了之类）
+                    p.closeContainer();
+                    say("已从潜影盒里取出火箭/经验瓶，现在挖回潜影盒");
+                    cs = CS_BOX_MINE;
+                    mineTicks = 0;
+                    mining = false;
+                }
+            }
+
+            case CS_BOX_MINE -> {
+                if (!(w.getBlockState(boxPos).getBlock() instanceof ShulkerBoxBlock)) {
+                    mining = false;
+                    pickWait = 0;
+                    cs = CS_BOX_CHECK;
+                    return;
+                }
+                // 潜影盒不需要精准采集，有镐子就用镐子（快），没有就空手
+                int pick = findAnyPickaxe(p);
+                if (pick >= 9) {
+                    InvUtils.move().from(pick).toHotbar(supplySlot);
+                    return;
+                }
+                if (pick >= 0) InvUtils.swap(pick, false);
+                faceBlock(p, boxPos);
+                if (!mining) {
+                    mc.gameMode.startDestroyBlock(boxPos, Direction.UP);
+                    mining = true;
+                } else {
+                    mc.gameMode.continueDestroyBlock(boxPos, Direction.UP);
+                }
+                p.swing(InteractionHand.MAIN_HAND);
+                if (++mineTicks > 600) logout(mc, "潜影盒挖不掉");
+            }
+
+            case CS_BOX_CHECK -> {
+                // 挖掉之后最多等 10 秒，确认潜影盒回到了背包
+                if (countShulkers(p) >= boxBefore) {
+                    say("潜影盒已收回");
+                    boxPos = null;
+                    pickWait = 0;
+                    csTries = 0;
+                    cs = CS_OPEN; // 回去打开末影箱，把潜影盒放回去
+                    return;
+                }
+                if (++pickWait >= CHECK_TICKS) {
+                    logout(mc, "潜影盒挖掉后 10 秒内没有回到背包");
+                }
+            }
+
+            case CS_CHEST_MINE -> {
+                if (w.getBlockState(chestPos).isAir()) {
+                    mining = false;
+                    pickWait = 0;
+                    cs = CS_CHEST_CHECK;
+                    return;
+                }
                 int pick = findSilkPickaxe(p);
                 if (pick < 0) {
-                    say("没有精准采集镐，末影箱留在原地：" + chestPos.toShortString());
-                    mode = Mode.PREP;
+                    chestNotRecovered(mc, "没有精准采集镐，末影箱留在原地：" + chestPos.toShortString());
                     return;
                 }
                 if (pick >= 9) {
@@ -2092,27 +2359,32 @@ private static final class ElytraPilot {
                     mc.gameMode.continueDestroyBlock(chestPos, Direction.UP);
                 }
                 p.swing(InteractionHand.MAIN_HAND);
-                if (++mineTicks > 400) chestFail(mc, "挖不掉末影箱");
+                if (++mineTicks > 400) chestNotRecovered(mc, "末影箱挖不掉");
             }
-            default -> {
-                // 第七步：确认末影箱真的回到了背包。确认不了就直接强制下线，不要让它留在没人管的地方。
+
+            case CS_CHEST_CHECK -> {
+                // 挖掉之后最多等 10 秒，确认末影箱回到了背包
                 if (count(p, Items.ENDER_CHEST) > chestPreCount) {
-                    say("末影箱补给完成，末影箱已收回");
+                    say("末影箱补给完成，末影箱已收回，准备起飞");
                     mode = Mode.PREP;
                     return;
                 }
-                if (++pickWait >= 60) {
-                    logout(mc, "末影箱挖掉后没能确认收回背包");
+                if (++pickWait >= CHECK_TICKS) {
+                    chestNotRecovered(mc, "末影箱挖掉后 10 秒内没有回到背包");
                 }
             }
+
+            default -> { }
         }
     }
 
-    private static BlockPos pickSite(Level w, LocalPlayer p) {
+    // 找一个能放方块的空位（脚下是实心的、头顶两格是空气），exclude 是已经占用的位置
+    private static BlockPos pickSite(Level w, LocalPlayer p, BlockPos exclude) {
         BlockPos b = p.blockPosition();
         int[][] d = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}};
         for (int[] o : d) {
             BlockPos c = b.offset(o[0], 0, o[1]);
+            if (exclude != null && c.equals(exclude)) continue;
             if (w.getBlockState(c).isAir() && w.getBlockState(c.above()).isAir()
                 && w.getBlockState(c.below()).isFaceSturdy(w, c.below(), Direction.UP)) return c;
         }
@@ -2127,7 +2399,49 @@ private static final class ElytraPilot {
         return -1;
     }
 
+    private static int findAnyPickaxe(LocalPlayer p) {
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = p.getInventory().getItem(i);
+            if (!s.isEmpty() && s.is(ItemTags.PICKAXES)) return i;
+        }
+        return -1;
+    }
+
+    // 火箭还不够，或者要修鞘翅但背包里没有经验瓶：还需要继续翻潜影盒
+    private boolean needMoreSupplies(LocalPlayer p) {
+        return count(p, Items.FIREWORK_ROCKET) < ENOUGH_ROCKETS
+            || (repairing && count(p, Items.EXPERIENCE_BOTTLE) == 0);
+    }
+
     /* ========== 通用小工具 ========== */
+
+    // 当前是不是开着一个容器界面（containerId 0 是玩家自己的背包界面）
+    private static boolean isOpen(LocalPlayer p) {
+        return p.containerMenu != null && p.containerMenu.containerId != 0;
+    }
+
+    // 玩家背包下标（0~8 快捷栏，9~35 主背包）-> 当前打开的容器界面里的格子编号。
+    // 箱子/潜影盒/末影箱的界面，最后 36 格依次是：主背包 27 格、快捷栏 9 格。
+    private static int playerSlotId(AbstractContainerMenu menu, int i) {
+        int base = menu.slots.size() - 36;
+        return i < 9 ? base + 27 + i : base + (i - 9);
+    }
+
+    private static int countShulkers(LocalPlayer p) {
+        int n = 0;
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = p.getInventory().getItem(i);
+            if (s.is(ItemTags.SHULKER_BOXES)) n += s.getCount();
+        }
+        return n;
+    }
+
+    private static int firstShulkerSlot(LocalPlayer p) {
+        for (int i = 0; i < 36; i++) {
+            if (p.getInventory().getItem(i).is(ItemTags.SHULKER_BOXES)) return i;
+        }
+        return -1;
+    }
 
     // 保证火箭在固定的快捷栏格子里（不再占用副手）
     private void ensureRocketSlot(LocalPlayer p) {
@@ -2182,19 +2496,11 @@ private static final class ElytraPilot {
         return -1;
     }
 
-    /** 0~35 里第一个空格子（快捷栏优先），不含副手。从末影箱里一件一件拖东西出来时用。 */
-    private static int firstEmptySlot(LocalPlayer p) {
-        for (int i = 0; i < 36; i++) {
-            if (p.getInventory().getItem(i).isEmpty()) return i;
-        }
-        return -1;
-    }
-
     private static float yawTo(double dx, double dz) {
         return (float) Math.toDegrees(Math.atan2(-dx, dz));
     }
 
-    // 把玩家视角转向指定方块的中心：末影箱的放置/打开/挖掘都要先调用这个，
+    // 把玩家视角转向指定方块的中心：放置/打开/挖掘都要先调用这个，
     // 不然有些服务器的反作弊会因为“你根本没看着这个方块”而悄悄拒绝交互，
     // 导致补给卡住却看不出原因。
     private static void faceBlock(LocalPlayer p, BlockPos pos) {
@@ -2215,7 +2521,6 @@ private static final class ElytraPilot {
     }
 
     // 断线后跳转到"选择服务器"界面，而不是传 null 导致客户端崩溃回启动器。
-    // 如果你的版本里这两个类名不对（编译报错），把报错发我，我换成对应的名字。
     private void logout(Minecraft mc, String reason) {
         mode = Mode.IDLE;
         jump(mc, false);
