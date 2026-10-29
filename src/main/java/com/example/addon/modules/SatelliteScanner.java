@@ -1564,8 +1564,11 @@ private static final class ElytraPilot {
     // 末影箱补给
     private int cs, csWait, csTries, takePass, mineTicks, pickWait;
     private int chestPreCount;   // 末影箱放下后背包里的末影箱数量，挖回来之后应该 +1
-    private int boxBaseline;     // 补给开始前背包里本来就有的潜影盒数量
-    private int boxBefore;       // 放下某个潜影盒之前，背包里的潜影盒数量（挖回来之后应该恢复到这个数）
+    // 认盒子：不数数量，而是靠"哪些格子是潜影盒"的前后对比，认出哪个是我们自己从末影箱拿出来的
+    private int ourSlot = -1;                          // 我们正在处理的那个潜影盒在背包里的下标（-1 = 没有）
+    private boolean[] takeSnap = new boolean[36];      // 从末影箱拿潜影盒之前，背包里哪些格子是潜影盒
+    private boolean[] othersMask = new boolean[36];    // 我们的潜影盒放在地上期间，背包里的潜影盒全是"别人的"
+    private int storeWait;                             // 放回末影箱后，等几个 tick 确认服务器真的收下了
     private int boxScanFrom;     // 末影箱里从第几格开始找下一个潜影盒（已经处理过的排除掉）
     private int boxRounds;       // 已经处理了几个潜影盒
     private boolean mining, chestPlaced, tookBox;
@@ -1985,6 +1988,11 @@ private static final class ElytraPilot {
      *  5. 用精准采集镐挖掉末影箱，最多等 10 秒确认回到背包，回来了就继续起飞；
      *     没回来则看 logout-if-enderchest-lost：开=强制下线，关=不下线继续飞
      *
+     * 怎么认"自己的"潜影盒：不数数量，而是前后对比哪些格子是潜影盒——
+     *   从末影箱拿出来之前记一份，拿完后新出现的那个格子就是我们的（ourSlot）；
+     *   放到地上期间，背包里剩下的潜影盒全算"别人的"，挖回来之后，别人的格子之外新出现的就是我们的。
+     *   所以背包里本来就有的其他潜影盒，不会被放到地上、也不会被塞进末影箱。
+     *
      * 从容器里"拿东西"一律用 InvUtils.shiftClick().slotId(容器里的格子号)。
      * 注意 InvUtils.move().from(n) 里的 n 是玩家背包下标，不是容器格子号，不能拿来点容器里的格子。
      * 另外刚打开容器的头几个 tick 里格子内容还没同步，必须先等一等再判断"里面有没有东西"。 */
@@ -2003,10 +2011,12 @@ private static final class ElytraPilot {
         chestPos = null;
         boxPos = null;
         chestPreCount = 0;
-        boxBefore = 0;
+        ourSlot = -1;
+        storeWait = 0;
+        takeSnap = new boolean[36];
+        othersMask = new boolean[36];
         boxScanFrom = 0;
         boxRounds = 0;
-        boxBaseline = countShulkers(p);
         say("去末影箱补给");
         qq.accept("背包物资不足，尝试从末影箱补给");
     }
@@ -2138,15 +2148,22 @@ private static final class ElytraPilot {
                 int total = menu.slots.size() - 36;
                 boolean stuck = takePass > 80; // 点了这么久还没完成（背包满了之类），别磨了
 
-                // A. 上一轮处理完的潜影盒，放回末影箱
-                if (!stuck && countShulkers(p) > boxBaseline) {
-                    for (int i = 0; i < 36; i++) {
-                        if (p.getInventory().getItem(i).is(ItemTags.SHULKER_BOXES)) {
-                            InvUtils.shiftClick().slotId(playerSlotId(menu, i));
-                            break;
+                // A. 上一轮处理完的那个潜影盒（按格子认，背包里别的潜影盒不动），放回末影箱
+                if (ourSlot >= 0) {
+                    if (p.getInventory().getItem(ourSlot).is(ItemTags.SHULKER_BOXES)) {
+                        storeWait = 0;
+                        if (stuck) {
+                            say("潜影盒放不回末影箱（满了？），先留在背包里");
+                            ourSlot = -1;
+                        } else {
+                            InvUtils.shiftClick().slotId(playerSlotId(menu, ourSlot));
+                            return;
                         }
+                    } else {
+                        // 格子空了：再等几个 tick，确认服务器真的收下了（没被弹回来）
+                        if (++storeWait < 6) return;
+                        ourSlot = -1;
                     }
-                    return;
                 }
 
                 // B. 拿散放在末影箱里的火箭/经验瓶
@@ -2164,9 +2181,10 @@ private static final class ElytraPilot {
 
                 // C. 火箭还不够（或者需要经验瓶但没有）：再拿出一个潜影盒，按格子顺序往后翻
                 tookBox = false;
-                if (!stuck && boxRounds < MAX_BOX_ROUNDS && needMoreSupplies(p)) {
+                if (!stuck && ourSlot < 0 && boxRounds < MAX_BOX_ROUNDS && needMoreSupplies(p)) {
                     for (int i = boxScanFrom; i < total; i++) {
                         if (menu.getSlot(i).getItem().is(ItemTags.SHULKER_BOXES)) {
+                            takeSnap = shulkerMask(p); // 拿之前背包里已有的潜影盒，都是别人的
                             InvUtils.shiftClick().slotId(i);
                             boxScanFrom = i + 1;
                             boxRounds++;
@@ -2184,7 +2202,8 @@ private static final class ElytraPilot {
             case CS_SETTLE -> {
                 if (++pickWait < 10) return; // 等服务器把刚才的点击同步完
                 if (tookBox) {
-                    if (countShulkers(p) > boxBaseline) {
+                    ourSlot = newShulkerSlot(p, takeSnap); // 新出现的那个潜影盒格子，就是我们拿出来的
+                    if (ourSlot >= 0) {
                         say("潜影盒已拿出来，放到地上取火箭/经验瓶");
                         csTries = 0;
                         cs = CS_BOX_PLACE;
@@ -2198,9 +2217,13 @@ private static final class ElytraPilot {
             }
 
             case CS_BOX_PLACE -> {
-                int s = firstShulkerSlot(p);
-                if (s < 0 || countShulkers(p) <= boxBaseline) {
-                    giveUpBoxes("背包里没有可处理的潜影盒了");
+                if (ourSlot < 0) {
+                    giveUpBoxes("没记录到要处理的潜影盒，不再处理潜影盒");
+                    return;
+                }
+                if (!p.getInventory().getItem(ourSlot).is(ItemTags.SHULKER_BOXES)) {
+                    // 记录的格子里现在没有潜影盒（可能刚搬动过，还没同步）：等几个 tick，还不对就放弃
+                    if (++csTries > 10) giveUpBoxes("找不到要处理的潜影盒了，不再处理潜影盒");
                     return;
                 }
                 if (boxPos == null || !w.getBlockState(boxPos).isAir()) {
@@ -2211,16 +2234,19 @@ private static final class ElytraPilot {
                     }
                 }
                 faceBlock(p, boxPos.below());
-                if (s >= 9) {
-                    InvUtils.move().from(s).toHotbar(supplySlot);
-                    return; // 下个 tick 它就在快捷栏里了
+                if (ourSlot >= 9) {
+                    InvUtils.move().from(ourSlot).toHotbar(supplySlot);
+                    ourSlot = supplySlot; // 搬过去之后它就在快捷栏的周转格子里了
+                    csTries = 0;
+                    return; // 下个 tick 再检查它是不是真的到了
                 }
-                InvUtils.swap(s, false);
+                InvUtils.swap(ourSlot, false);
                 if (!p.getMainHandItem().is(ItemTags.SHULKER_BOXES)) {
                     if (++csTries > 10) giveUpBoxes("潜影盒没能拿到手上，把它放回末影箱");
                     return;
                 }
-                boxBefore = countShulkers(p); // 放下之前的数量，挖回来之后应该恢复到这个数
+                othersMask = shulkerMask(p);
+                othersMask[ourSlot] = false; // 手里这个是我们的，背包里其余的潜影盒都是别人的
                 mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND,
                     new BlockHitResult(new Vec3(boxPos.getX() + 0.5, boxPos.getY(), boxPos.getZ() + 0.5),
                         Direction.UP, boxPos.below(), false));
@@ -2239,6 +2265,7 @@ private static final class ElytraPilot {
                     }
                     return;
                 }
+                othersMask = shulkerMask(p); // 我们的盒子在地上，背包里剩下的潜影盒全是别人的
                 if (isOpen(p)) {
                     takePass = 0;
                     csTries = 0;
@@ -2259,6 +2286,7 @@ private static final class ElytraPilot {
             }
 
             case CS_BOX_TAKE -> {
+                othersMask = shulkerMask(p);
                 if (!isOpen(p)) {
                     // 容器被意外关掉了：重新打开，反复关就别拿了，直接挖回来
                     if (++csTries > 5) {
@@ -2301,6 +2329,7 @@ private static final class ElytraPilot {
                     cs = CS_BOX_CHECK;
                     return;
                 }
+                othersMask = shulkerMask(p); // 盒子还在地上，背包里的潜影盒全是别人的（挖掘时搬动镐子也不影响）
                 // 潜影盒不需要精准采集，有镐子就用镐子（快），没有就空手
                 int pick = findAnyPickaxe(p);
                 if (pick >= 9) {
@@ -2321,11 +2350,14 @@ private static final class ElytraPilot {
 
             case CS_BOX_CHECK -> {
                 // 挖掉之后最多等 10 秒，确认潜影盒回到了背包
-                if (countShulkers(p) >= boxBefore) {
+                int back = newShulkerSlot(p, othersMask); // 别人的格子之外新出现的，就是我们挖回来的
+                if (back >= 0) {
+                    ourSlot = back;
                     say("潜影盒已收回");
                     boxPos = null;
                     pickWait = 0;
                     csTries = 0;
+                    storeWait = 0;
                     cs = CS_OPEN; // 回去打开末影箱，把潜影盒放回去
                     return;
                 }
@@ -2427,18 +2459,19 @@ private static final class ElytraPilot {
         return i < 9 ? base + 27 + i : base + (i - 9);
     }
 
-    private static int countShulkers(LocalPlayer p) {
-        int n = 0;
+    // 当前背包 0~35 里，哪些格子是潜影盒
+    private static boolean[] shulkerMask(LocalPlayer p) {
+        boolean[] m = new boolean[36];
         for (int i = 0; i < 36; i++) {
-            ItemStack s = p.getInventory().getItem(i);
-            if (s.is(ItemTags.SHULKER_BOXES)) n += s.getCount();
+            m[i] = p.getInventory().getItem(i).is(ItemTags.SHULKER_BOXES);
         }
-        return n;
+        return m;
     }
 
-    private static int firstShulkerSlot(LocalPlayer p) {
+    // 现在是潜影盒、但 before 里不是的格子：就是这段时间里新出现的那个。没有就返回 -1
+    private static int newShulkerSlot(LocalPlayer p, boolean[] before) {
         for (int i = 0; i < 36; i++) {
-            if (p.getInventory().getItem(i).is(ItemTags.SHULKER_BOXES)) return i;
+            if (!before[i] && p.getInventory().getItem(i).is(ItemTags.SHULKER_BOXES)) return i;
         }
         return -1;
     }
