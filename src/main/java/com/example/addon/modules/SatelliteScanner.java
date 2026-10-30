@@ -2542,8 +2542,9 @@ private static final class ElytraPilot {
         ItemContainerContents c = box.get(DataComponents.CONTAINER);
         if (c == null) return 0;
         int n = 0;
-        for (ItemStack s : c.nonEmptyItems()) {
-            if (s.is(item)) n += s.getCount();
+        // 26.x 里 nonEmptyItems() 返回的是 ItemStackTemplate（只有物品+数量+组件），不是 ItemStack
+        for (var s : c.nonEmptyItems()) {
+            if (s.item().value() == item) n += s.count();
         }
         return n;
     }
