@@ -51,6 +51,7 @@ import net.minecraft.tags.ItemTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -283,12 +284,12 @@ public class SatelliteScanner extends Module {
 
     private final Setting<Boolean> useChest = sgAuto.add(new BoolSetting.Builder()
         .name("use-ender-chest")
-        .description("背包没有火箭/经验瓶时，落地放下末影箱去拿。末影箱里如果是潜影盒装的火箭/经验瓶，会把潜影盒拿出来放地上取东西，挖回来后再放回末影箱；最后用精准采集镐收回末影箱。背包里本来就有的其他潜影盒不会被动")
+        .description("背包没有火箭/经验瓶时，落地放下末影箱去拿。末影箱里如果是潜影盒装的火箭/经验瓶，会把潜影盒拿出来放地上取东西，挖回来后再放回末影箱；最后用精准采集镐收回末影箱。挖掉后会自动走过去捡掉落物。背包里本来就有的其他潜影盒不会被动")
         .defaultValue(true).build());
 
     private final Setting<Boolean> logoutIfChestLost = sgAuto.add(new BoolSetting.Builder()
         .name("logout-if-enderchest-lost")
-        .description("补给完挖末影箱后，10 秒内背包里没出现末影箱（没收回来，或者没有精准采集镐）时：开=自动下线；关=不下线，继续飞（末影箱留在地上）。潜影盒挖掉后 10 秒没回到背包则不管这个设置，一律自动下线")
+        .description("补给完挖末影箱后，15 秒内背包里没出现末影箱（没收回来，或者没有精准采集镐）时：开=自动下线；关=不下线，继续飞（末影箱留在地上）。潜影盒挖掉后 15 秒没回到背包则不管这个设置，一律自动下线")
         .defaultValue(false).build());
 
     private final Setting<Integer> supplySlot = sgAuto.add(new IntSetting.Builder()
@@ -1499,7 +1500,8 @@ public class SatelliteScanner extends Module {
  * 支持暂停/继续：暂停时把飞行控制权交还给玩家（可以自己随便飞），继续时从暂停的航点接管飞行，
  * 飞回原来的航线继续扫同一片区域；暂停期间不会清空已经扫到的数据，恢复后不会重复上报。
  * 补给流程：耐久低 / 火箭少 -> 降落 -> 背包里拿经验瓶修补、拿火箭 -> 背包没有就放末影箱去拿
- * （末影箱里的潜影盒会拿出来放地上取东西，挖回来、10 秒内确认回到背包后放回末影箱，再收回末影箱）
+ * （末影箱里的潜影盒会拿出来放地上取东西，挖回来、15 秒内确认回到背包后放回末影箱，再收回末影箱；
+ * 挖掉后会自动走向掉落物把它捡起来）
  * -> 还是没有就（落地后）下线。
  * 火箭固定放在 rocketSlot 这个快捷栏格子，不占副手；副手留给你自己放的图腾（脚本会自动把背包里的图腾放进副手，
  * 但从不会把它换走）。经验瓶/末影箱/镐/潜影盒临时用 supplySlot 这个快捷栏格子。
@@ -1516,7 +1518,7 @@ private static final class ElytraPilot {
     int rocketSlot = 7;      // 快捷栏下标 0~8（固定放火箭，不占副手）
     double minSpeed = 1.0;   // 格/tick，低于就放火箭
     boolean useChest = true;
-    boolean logoutIfChestLost = false; // 末影箱挖掉后 10 秒没回到背包：true=下线，false=不下线继续飞
+    boolean logoutIfChestLost = false; // 末影箱挖掉后 15 秒没回到背包：true=下线，false=不下线继续飞
     boolean lowFlight = false;  // 开：地形跟随低飞；关：固定 altitude 高空巡航
     int hoverHeight = 30;       // 低飞模式：目标高度 = 前方地形最高点 + 这个值
     int climbLookahead = 30;    // 低飞模式：往飞行方向看多远来判断要不要提前爬升
@@ -1536,11 +1538,11 @@ private static final class ElytraPilot {
     private static final int CS_BOX_OPEN = 7;     // 打开潜影盒
     private static final int CS_BOX_TAKE = 8;     // 从潜影盒里拿火箭/经验瓶
     private static final int CS_BOX_MINE = 9;     // 挖回潜影盒
-    private static final int CS_BOX_CHECK = 10;   // 最多等 10 秒，确认潜影盒回到背包
+    private static final int CS_BOX_CHECK = 10;   // 走过去捡掉落物，最多等 15 秒，确认潜影盒回到背包
     private static final int CS_CHEST_MINE = 11;  // 用精准采集镐挖末影箱
-    private static final int CS_CHEST_CHECK = 12; // 最多等 10 秒，确认末影箱回到背包
+    private static final int CS_CHEST_CHECK = 12; // 走过去捡掉落物，最多等 15 秒，确认末影箱回到背包
 
-    private static final int CHECK_TICKS = 200;    // 10 秒
+    private static final int CHECK_TICKS = 300;    // 15 秒（含走路捡东西的时间）
     private static final int OPEN_SYNC_TICKS = 6;  // 刚打开容器时，等格子内容同步过来再动手
     private static final int ENOUGH_ROCKETS = 128; // 背包里火箭够这个数，就不再翻后面的潜影盒
     private static final int MAX_BOX_ROUNDS = 6;   // 一次补给最多处理几个潜影盒，防止死循环
@@ -1573,6 +1575,7 @@ private static final class ElytraPilot {
     private int boxRounds;       // 已经处理了几个潜影盒
     private boolean mining, chestPlaced, tookBox;
     private BlockPos chestPos, boxPos;
+    private final HashSet<BlockPos> badSites = new HashSet<>(); // 放置失败的位置，换别处再试
 
     ElytraPilot(Consumer<String> say, Consumer<String> qq, Consumer<String> qqUrgent, Consumer<Boolean> onEnd) {
         this.say = say;
@@ -1609,7 +1612,7 @@ private static final class ElytraPilot {
     void stop(Minecraft mc) {
         if (mode != Mode.IDLE) {
             mode = Mode.IDLE;
-            jump(mc, false);
+            stopWalk(mc);
         }
     }
 
@@ -1983,9 +1986,9 @@ private static final class ElytraPilot {
      *  2. 末影箱打开后：先把上一轮处理完的潜影盒放回去，再拿散放的火箭/经验瓶；
      *     火箭还不够的话，再拿出一个潜影盒（每次只拿一个，按格子顺序往后翻），然后关掉末影箱
      *  3. 拿出来的潜影盒：放到地上 -> 打开 -> 把火箭/经验瓶拿出来 -> 挖回来，
-     *     最多等 10 秒确认回到背包；10 秒内没回来 = 强制下线（里面的东西不能丢）
+     *     自动走向掉落物捡起来，最多等 15 秒确认回到背包；没回来 = 强制下线（里面的东西不能丢）
      *  4. 回到第 2 步，把潜影盒放回末影箱；不需要再翻潜影盒了就关掉末影箱
-     *  5. 用精准采集镐挖掉末影箱，最多等 10 秒确认回到背包，回来了就继续起飞；
+     *  5. 用精准采集镐挖掉末影箱，自动走过去捡，最多等 15 秒确认回到背包，回来了就继续起飞；
      *     没回来则看 logout-if-enderchest-lost：开=强制下线，关=不下线继续飞
      *
      * 怎么认"自己的"潜影盒：不数数量，而是前后对比哪些格子是潜影盒——
@@ -2017,6 +2020,7 @@ private static final class ElytraPilot {
         othersMask = new boolean[36];
         boxScanFrom = 0;
         boxRounds = 0;
+        badSites.clear();
         say("去末影箱补给");
         qq.accept("背包物资不足，尝试从末影箱补给");
     }
@@ -2024,6 +2028,7 @@ private static final class ElytraPilot {
     // 末影箱还没放下之前出的问题：退回地面决策，不强制下线
     private void chestFail(Minecraft mc, String why) {
         if (mc.player != null) mc.player.closeContainer();
+        stopWalk(mc);
         say("末影箱补给失败：" + why);
         mode = Mode.PREP;
     }
@@ -2039,6 +2044,7 @@ private static final class ElytraPilot {
     // 末影箱没能收回来：按设置决定下线还是继续飞
     private void chestNotRecovered(Minecraft mc, String why) {
         if (mc.player != null) mc.player.closeContainer();
+        stopWalk(mc);
         if (logoutIfChestLost) {
             logout(mc, why);
         } else {
@@ -2110,8 +2116,15 @@ private static final class ElytraPilot {
                 if (!w.getBlockState(chestPos).is(Blocks.ENDER_CHEST)) {
                     if (++pickWait > 40) {
                         pickWait = 0;
-                        if (++csTries > 3) chestFail(mc, "放不下末影箱");
-                        else cs = CS_HOLD;
+                        if (!chestPlaced) {
+                            // 还没放下过：这个位置放不下，换一个位置重新选
+                            badSites.add(chestPos);
+                            if (++csTries > 4) chestFail(mc, "放不下末影箱");
+                            else cs = CS_AIM;
+                        } else {
+                            // 之前放下过（这是回来放回潜影盒的那一轮），箱子却不见了
+                            chestFail(mc, "末影箱不见了");
+                        }
                     }
                     return;
                 }
@@ -2260,7 +2273,10 @@ private static final class ElytraPilot {
                 if (!(w.getBlockState(boxPos).getBlock() instanceof ShulkerBoxBlock)) {
                     if (++pickWait > 40) {
                         pickWait = 0;
-                        if (++csTries > 3) giveUpBoxes("潜影盒放不下，把它放回末影箱");
+                        // 这个位置放不下：记下来，换一个位置重新放
+                        badSites.add(boxPos);
+                        boxPos = null;
+                        if (++csTries > 4) giveUpBoxes("潜影盒放不下，把它放回末影箱");
                         else cs = CS_BOX_PLACE;
                     }
                     return;
@@ -2349,9 +2365,10 @@ private static final class ElytraPilot {
             }
 
             case CS_BOX_CHECK -> {
-                // 挖掉之后最多等 10 秒，确认潜影盒回到了背包
+                // 挖掉之后走过去捡掉落物，最多等 15 秒，确认潜影盒回到了背包
                 int back = newShulkerSlot(p, othersMask); // 别人的格子之外新出现的，就是我们挖回来的
                 if (back >= 0) {
+                    stopWalk(mc);
                     ourSlot = back;
                     say("潜影盒已收回");
                     boxPos = null;
@@ -2361,8 +2378,9 @@ private static final class ElytraPilot {
                     cs = CS_OPEN; // 回去打开末影箱，把潜影盒放回去
                     return;
                 }
+                walkToDrop(mc, p, boxPos, s -> s.is(ItemTags.SHULKER_BOXES));
                 if (++pickWait >= CHECK_TICKS) {
-                    logout(mc, "潜影盒挖掉后 10 秒内没有回到背包");
+                    logout(mc, "潜影盒挖掉后 15 秒内没有回到背包");
                 }
             }
 
@@ -2395,14 +2413,16 @@ private static final class ElytraPilot {
             }
 
             case CS_CHEST_CHECK -> {
-                // 挖掉之后最多等 10 秒，确认末影箱回到了背包
+                // 挖掉之后走过去捡掉落物，最多等 15 秒，确认末影箱回到了背包
                 if (count(p, Items.ENDER_CHEST) > chestPreCount) {
+                    stopWalk(mc);
                     say("末影箱补给完成，末影箱已收回，准备起飞");
                     mode = Mode.PREP;
                     return;
                 }
+                walkToDrop(mc, p, chestPos, s -> s.is(Items.ENDER_CHEST));
                 if (++pickWait >= CHECK_TICKS) {
-                    chestNotRecovered(mc, "末影箱挖掉后 10 秒内没有回到背包");
+                    chestNotRecovered(mc, "末影箱挖掉后 15 秒内没有回到背包");
                 }
             }
 
@@ -2410,17 +2430,77 @@ private static final class ElytraPilot {
         }
     }
 
-    // 找一个能放方块的空位（脚下是实心的、头顶两格是空气），exclude 是已经占用的位置
-    private static BlockPos pickSite(Level w, LocalPlayer p, BlockPos exclude) {
+    // 找一个能放方块的空位：脚下是实心的、头顶两格是空气、不和玩家自己的碰撞箱重叠、
+    // 在交互距离内、不是之前放置失败过的位置。exclude 是已经占用的位置。
+    // 不再只挑相邻 8 格——玩家站在方块边缘时相邻格会和脚重叠，服务器会拒绝放置，要跳一下才行。
+    private BlockPos pickSite(Level w, LocalPlayer p, BlockPos exclude) {
         BlockPos b = p.blockPosition();
-        int[][] d = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}};
-        for (int[] o : d) {
-            BlockPos c = b.offset(o[0], 0, o[1]);
-            if (exclude != null && c.equals(exclude)) continue;
-            if (w.getBlockState(c).isAir() && w.getBlockState(c.above()).isAir()
-                && w.getBlockState(c.below()).isFaceSturdy(w, c.below(), Direction.UP)) return c;
+        AABB me = p.getBoundingBox().inflate(0.05);
+        Vec3 eye = p.getEyePosition();
+        BlockPos best = null;
+        double bestD = Double.MAX_VALUE;
+
+        for (int dx = -3; dx <= 3; dx++) {
+            for (int dz = -3; dz <= 3; dz++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    BlockPos c = b.offset(dx, dy, dz);
+                    if (exclude != null && c.equals(exclude)) continue;
+                    if (badSites.contains(c)) continue;
+                    if (!w.getBlockState(c).isAir() || !w.getBlockState(c.above()).isAir()) continue;
+                    if (!w.getFluidState(c).isEmpty()) continue;
+                    if (!w.getBlockState(c.below()).isFaceSturdy(w, c.below(), Direction.UP)) continue;
+                    if (me.intersects(new AABB(c))) continue; // 关键：不和玩家碰撞箱重叠
+                    double d = eye.distanceToSqr(c.getX() + 0.5, c.getY() + 0.5, c.getZ() + 0.5);
+                    if (d > 4.0 * 4.0) continue; // 保证在交互距离内
+                    if (d < bestD) {
+                        bestD = d;
+                        best = c;
+                    }
+                }
+            }
         }
-        return null;
+        return best;
+    }
+
+    /* ========== 走过去捡掉落物 ========== */
+
+    private static void stopWalk(Minecraft mc) {
+        if (mc.options == null) return;
+        mc.options.keyUp.setDown(false);
+        mc.options.keyJump.setDown(false);
+    }
+
+    // 找 near 附近 8 格内符合条件的掉落物，朝最近的一个走过去（被挡住或掉落物比脚高就跳）。
+    // 返回 true = 还有目标掉落物，正在走；false = 附近没有（可能还没掉出来，或者已经捡走了）。
+    private boolean walkToDrop(Minecraft mc, LocalPlayer p, BlockPos near, Predicate<ItemStack> want) {
+        if (near == null) {
+            stopWalk(mc);
+            return false;
+        }
+        List<ItemEntity> items = mc.level.getEntitiesOfClass(
+            ItemEntity.class, new AABB(near).inflate(8), e -> want.test(e.getItem()));
+        if (items.isEmpty()) {
+            stopWalk(mc);
+            return false;
+        }
+        ItemEntity t = items.get(0);
+        for (ItemEntity e : items) {
+            if (e.distanceToSqr(p) < t.distanceToSqr(p)) t = e;
+        }
+        double dx = t.getX() - p.getX();
+        double dz = t.getZ() - p.getZ();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+
+        p.setYRot(yawTo(dx, dz));
+        p.setXRot(10f);
+        if (dist < 0.4) { // 已经站在它上面了，等它被吸进背包
+            mc.options.keyUp.setDown(false);
+            mc.options.keyJump.setDown(false);
+            return true;
+        }
+        mc.options.keyUp.setDown(true);
+        mc.options.keyJump.setDown(p.onGround() && (p.horizontalCollision || t.getY() - p.getY() > 0.6));
+        return true;
     }
 
     private static int findSilkPickaxe(LocalPlayer p) {
@@ -2556,7 +2636,7 @@ private static final class ElytraPilot {
     // 断线后跳转到"选择服务器"界面，而不是传 null 导致客户端崩溃回启动器。
     private void logout(Minecraft mc, String reason) {
         mode = Mode.IDLE;
-        jump(mc, false);
+        stopWalk(mc);
         say("自动下线：" + reason);
         qqUrgent.accept("自动下线：" + reason);
         onEnd.accept(false);
