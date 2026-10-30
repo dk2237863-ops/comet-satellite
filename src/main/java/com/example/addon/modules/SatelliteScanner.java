@@ -1578,6 +1578,11 @@ private static final class ElytraPilot {
     private boolean mining, chestPlaced, tookBox;
     private BlockPos chestPos, boxPos;
     private final HashSet<BlockPos> badSites = new HashSet<>(); // 放置失败的位置，换别处再试
+    private final ArrayDeque<int[]> clickQ = new ArrayDeque<>(); // 排队待发的容器点击 {格子号, 鼠标键 0左/1右}
+    private int chestTrips;       // 这次起飞前已经去末影箱补给了几趟（经验瓶估少了可以再去，最多 3 趟）
+    private int xpPlans;          // 当前这个容器里已经排过几次“精确取经验瓶”，防止反复重排
+    private boolean xpEmpty;      // 末影箱里已经没有经验瓶可拿了，别再白跑
+    private boolean spaceBlocked; // 刚才有东西因为要给潜影盒留空位而没拿
 
     ElytraPilot(Consumer<String> say, Consumer<String> qq, Consumer<String> qqUrgent, Consumer<Boolean> onEnd) {
         this.say = say;
@@ -1608,6 +1613,8 @@ private static final class ElytraPilot {
         lastRocket = -100;
         takeoffY = -1e9;
         finishing = repairing = triedChest = false;
+        chestTrips = 0;
+        xpEmpty = false;
         prepWait = equipTries = 0;
     }
 
@@ -1699,7 +1706,9 @@ private static final class ElytraPilot {
                 mode = Mode.REPAIR;
                 say(String.format(Locale.ROOT, "开始用经验瓶修补鞘翅：%d/%d", left, max));
                 return;
-            } else if (useChest && !triedChest) {
+            } else if (useChest && chestTrips < 3 && !xpEmpty) {
+                // 没有经验瓶（或者估少了用完了还没修好）：去末影箱拿，最多 3 趟，箱子里没有就不再白跑
+                repairing = true;
                 startChest(p);
                 return;
             } else if (left <= landBelow + 10) {
@@ -1721,6 +1730,8 @@ private static final class ElytraPilot {
         }
 
         triedChest = false;
+        chestTrips = 0;
+        xpEmpty = false;
         tk = 0;
         tkWait = 0;
         tkTicks = 0;
@@ -2023,6 +2034,10 @@ private static final class ElytraPilot {
         boxScanFrom = 0;
         boxRounds = 0;
         badSites.clear();
+        clickQ.clear();
+        chestTrips++;
+        xpPlans = 0;
+        spaceBlocked = false;
         say("去末影箱补给");
         qq.accept("背包物资不足，尝试从末影箱补给");
     }
@@ -2030,6 +2045,7 @@ private static final class ElytraPilot {
     // 末影箱还没放下之前出的问题：退回地面决策，不强制下线
     private void chestFail(Minecraft mc, String why) {
         if (mc.player != null) mc.player.closeContainer();
+        clickQ.clear();
         stopWalk(mc);
         say("末影箱补给失败：" + why);
         mode = Mode.PREP;
@@ -2038,6 +2054,7 @@ private static final class ElytraPilot {
     // 末影箱已经放在地上，但后面的步骤出了问题：先想办法把它收回来
     private void recoverChest(Minecraft mc) {
         if (mc.player != null) mc.player.closeContainer();
+        clickQ.clear();
         cs = CS_CHEST_MINE;
         mineTicks = 0;
         mining = false;
@@ -2136,6 +2153,7 @@ private static final class ElytraPilot {
                 }
                 if (isOpen(p)) {
                     takePass = 0;
+                    xpPlans = 0;
                     cs = CS_SESSION;
                     return;
                 }
@@ -2181,18 +2199,10 @@ private static final class ElytraPilot {
                     }
                 }
 
-                // B. 拿散放在末影箱里的火箭/经验瓶
-                if (!stuck) {
-                    int clicks = 0;
-                    for (int i = 0; i < total && clicks < 3; i++) {
-                        ItemStack s = menu.getSlot(i).getItem();
-                        if (s.is(Items.FIREWORK_ROCKET) || s.is(Items.EXPERIENCE_BOTTLE)) {
-                            InvUtils.shiftClick().slotId(i);
-                            clicks++;
-                        }
-                    }
-                    if (clicks > 0) return;
-                }
+                // B. 拿散放在末影箱里的火箭/经验瓶：经验瓶只拿估算要用的数量，
+                //    背包要给潜影盒留空位（只拿火箭或只拿经验留 1 格，两样都拿留 2 格）
+                if (drainClicks()) return; // 先把排好队的点击发完
+                if (!stuck && takeFrom(p, menu, total)) return;
 
                 // C. 火箭还不够（或者需要经验瓶但没有）：再拿出一个潜影盒，按格子顺序往后翻
                 tookBox = false;
@@ -2200,7 +2210,8 @@ private static final class ElytraPilot {
                     // 直接读潜影盒物品自带的内容数据（客户端本来就知道），
                     // 只拿真正装着火箭/经验瓶的盒子，里面是空的或装别的东西的不动
                     boolean needRockets = count(p, Items.FIREWORK_ROCKET) < ENOUGH_ROCKETS;
-                    boolean needXp = repairing && count(p, Items.EXPERIENCE_BOTTLE) == 0;
+                    int xpNeed = xpStillNeeded(p);
+                    boolean needXp = xpNeed > 0;
                     int bestSlot = -1, bestScore = 0, seenBoxes = 0;
                     for (int i = 0; i < total; i++) {
                         ItemStack it = menu.getSlot(i).getItem();
@@ -2208,7 +2219,7 @@ private static final class ElytraPilot {
                         seenBoxes++;
                         int score = 0;
                         if (needRockets) score += countInBox(it, Items.FIREWORK_ROCKET);
-                        if (needXp) score += countInBox(it, Items.EXPERIENCE_BOTTLE) * 64;
+                        if (needXp) score += Math.min(countInBox(it, Items.EXPERIENCE_BOTTLE), xpNeed) * 64;
                         if (score > bestScore) { // 优先拿装得最多的，少开几个盒子
                             bestScore = score;
                             bestSlot = i;
@@ -2223,8 +2234,11 @@ private static final class ElytraPilot {
                     } else if (seenBoxes > 0) {
                         say("末影箱里的 " + seenBoxes + " 个潜影盒都没有火箭/经验瓶，不用拿出来");
                     }
+                    // 还缺经验瓶，但散放的和潜影盒里都没有了（不是因为空间不够）：记下来，别再白跑
+                    if (needXp && bestSlot < 0 && !spaceBlocked) xpEmpty = true;
                 }
 
+                clickQ.clear();
                 p.closeContainer();
                 pickWait = 0;
                 cs = CS_SETTLE;
@@ -2302,6 +2316,7 @@ private static final class ElytraPilot {
                 othersMask = shulkerMask(p); // 我们的盒子在地上，背包里剩下的潜影盒全是别人的
                 if (isOpen(p)) {
                     takePass = 0;
+                    xpPlans = 0;
                     csTries = 0;
                     cs = CS_BOX_TAKE;
                     return;
@@ -2339,16 +2354,12 @@ private static final class ElytraPilot {
 
                 AbstractContainerMenu menu = p.containerMenu;
                 int total = menu.slots.size() - 36;
-                int clicks = 0;
-                for (int i = 0; i < total && clicks < 3; i++) {
-                    ItemStack s = menu.getSlot(i).getItem();
-                    if (s.is(Items.FIREWORK_ROCKET) || s.is(Items.EXPERIENCE_BOTTLE)) {
-                        InvUtils.shiftClick().slotId(i);
-                        clicks++;
-                    }
-                }
-                if (clicks == 0 || takePass > 80) { // 拿完了，或者拿了很久还没拿完（背包满了之类）
+                if (drainClicks()) return; // 先把排好队的点击发完
+                boolean more = takeFrom(p, menu, total); // 经验瓶只拿要用的数量，剩下的留在盒子里
+                if (!more || takePass > 80) { // 拿完了，或者拿了很久还没拿完（背包满了之类）
+                    clickQ.clear();
                     p.closeContainer();
+                    if (spaceBlocked) say("背包空间不够（要给潜影盒留位置），没有全部取出");
                     say("已从潜影盒里取出火箭/经验瓶，现在挖回潜影盒");
                     cs = CS_BOX_MINE;
                     mineTicks = 0;
@@ -2551,8 +2562,149 @@ private static final class ElytraPilot {
 
     // 火箭还不够，或者要修鞘翅但背包里没有经验瓶：还需要继续翻潜影盒
     private boolean needMoreSupplies(LocalPlayer p) {
-        return count(p, Items.FIREWORK_ROCKET) < ENOUGH_ROCKETS
-            || (repairing && count(p, Items.EXPERIENCE_BOTTLE) == 0);
+        return count(p, Items.FIREWORK_ROCKET) < ENOUGH_ROCKETS || xpStillNeeded(p) > 0;
+    }
+
+    /* ========== 经验瓶：按耐久估算数量，只拿要用的 ========== */
+
+    // 修到目标百分比大概需要多少瓶。每瓶 3~11 点经验（平均 7），修补每点经验修 2 点耐久，
+    // 平均每瓶约 14 点耐久；留 20% 余量再多 1 瓶，估少了的话修完还会再去拿（最多 3 趟）。
+    private int bottlesNeeded(LocalPlayer p) {
+        ItemStack el = p.getItemBySlot(EquipmentSlot.CHEST);
+        if (!el.is(Items.ELYTRA)) return 0;
+        int max = el.getMaxDamage();
+        int left = max - el.getDamageValue();
+        int deficit = max * repairPct / 100 - left;
+        if (deficit <= 0) return 0;
+        return (int) Math.ceil(deficit / 14.0 * 1.2) + 1;
+    }
+
+    // 还差多少瓶（背包里已有的先扣掉）。不需要修鞘翅时是 0
+    private int xpStillNeeded(LocalPlayer p) {
+        if (!repairing) return 0;
+        return Math.max(0, bottlesNeeded(p) - count(p, Items.EXPERIENCE_BOTTLE));
+    }
+
+    /* ========== 背包空位：拿东西要给潜影盒留位置 ========== */
+
+    // 要给潜影盒留几个空格：只拿火箭或只拿经验瓶留 1 个，两样都要拿留 2 个
+    private int reserveSlots(LocalPlayer p) {
+        boolean r = count(p, Items.FIREWORK_ROCKET) < ENOUGH_ROCKETS;
+        boolean x = xpStillNeeded(p) > 0;
+        return Math.max(1, (r ? 1 : 0) + (x ? 1 : 0));
+    }
+
+    private static int emptySlots(LocalPlayer p) {
+        int n = 0;
+        for (int i = 0; i < 36; i++) {
+            if (p.getInventory().getItem(i).isEmpty()) n++;
+        }
+        return n;
+    }
+
+    // 背包里已有的同类堆叠还能再塞多少个
+    private static int mergeRoom(LocalPlayer p, ItemStack stack) {
+        int room = 0;
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = p.getInventory().getItem(i);
+            if (!s.isEmpty() && ItemStack.isSameItemSameComponents(s, stack)) {
+                room += s.getMaxStackSize() - s.getCount();
+            }
+        }
+        return room;
+    }
+
+    // 整堆拿进来之后，空格数还够不够留（能并进已有堆叠的不占新格子）
+    private static boolean hasRoom(LocalPlayer p, ItemStack stack, int reserve) {
+        return emptySlots(p) > reserve || mergeRoom(p, stack) >= stack.getCount();
+    }
+
+    // 找一个放 want 个的背包格子（返回当前容器界面里的格子号）：优先并进已有堆叠，其次空格（要给盒子留位置）
+    private int findDst(LocalPlayer p, AbstractContainerMenu menu, ItemStack stack, int want, int reserve) {
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = p.getInventory().getItem(i);
+            if (!s.isEmpty() && ItemStack.isSameItemSameComponents(s, stack)
+                && s.getMaxStackSize() - s.getCount() >= want) return playerSlotId(menu, i);
+        }
+        if (emptySlots(p) > reserve) {
+            for (int i = 9; i < 36; i++) {
+                if (p.getInventory().getItem(i).isEmpty()) return playerSlotId(menu, i);
+            }
+            for (int i = 0; i < 9; i++) { // 快捷栏里别占用火箭格和周转格
+                if (i != rocketSlot && i != supplySlot && p.getInventory().getItem(i).isEmpty()) {
+                    return playerSlotId(menu, i);
+                }
+            }
+        }
+        return -1;
+    }
+
+    /* ========== 从当前打开的容器里拿东西 ========== */
+
+    // 每 tick 最多发 4 个排队的点击，发完返回 false。返回 true 表示这 tick 还在发点击，别的先等等
+    private boolean drainClicks() {
+        if (clickQ.isEmpty()) return false;
+        for (int n = 0; n < 4 && !clickQ.isEmpty(); n++) {
+            int[] c = clickQ.poll();
+            // data(1) = 右键，data(0) = 左键。如果 InvUtils.Action 在你这个版本里没有 data()，
+            // 就改成直接调 mc.gameMode 的容器点击方法
+            InvUtils.click().data(c[1]).slotId(c[0]);
+        }
+        return true;
+    }
+
+    // 拿火箭（整堆 shift 点击）和经验瓶（精确数量），都要给潜影盒留空位。
+    // 返回 true = 这 tick 发了点击或排了队，还没拿完；false = 没有更多能拿的了。
+    private boolean takeFrom(LocalPlayer p, AbstractContainerMenu menu, int total) {
+        spaceBlocked = false;
+        int reserve = reserveSlots(p);
+        boolean needR = count(p, Items.FIREWORK_ROCKET) < ENOUGH_ROCKETS;
+        int xpNeed = xpStillNeeded(p);
+        int clicks = 0;
+        for (int i = 0; i < total && clicks < 3; i++) {
+            ItemStack s = menu.getSlot(i).getItem();
+            if (s.isEmpty()) continue;
+            if (needR && s.is(Items.FIREWORK_ROCKET)) {
+                if (hasRoom(p, s, reserve)) {
+                    InvUtils.shiftClick().slotId(i);
+                    clicks++;
+                } else {
+                    spaceBlocked = true;
+                }
+            } else if (xpNeed > 0 && s.is(Items.EXPERIENCE_BOTTLE)) {
+                if (planExactTake(p, menu, i, s, xpNeed, reserve)) return true; // 点击已排队，下个 tick 开始发
+                spaceBlocked = true;
+            }
+        }
+        return clicks > 0;
+    }
+
+    // 从容器格子 src 里精确拿 want 个经验瓶进背包。
+    // 数量够整堆就直接 shift 点击；否则用鼠标拆：先拿起整堆，再按“放回去的少还是拿走的少”挑点击次数少的做法，
+    // 一个一个右键放（多出来的放回容器，或者要的放进背包），最后左键把剩下的整堆放下，鼠标上不留东西。
+    // 返回 false = 背包空间不够（要给潜影盒留位置）或者重排太多次，这堆不拿。
+    private boolean planExactTake(LocalPlayer p, AbstractContainerMenu menu, int src, ItemStack stack, int want, int reserve) {
+        if (xpPlans >= 6) return false;
+        int have = stack.getCount();
+        if (want >= have) {
+            if (!hasRoom(p, stack, reserve)) return false;
+            InvUtils.shiftClick().slotId(src);
+            xpPlans++;
+            return true;
+        }
+        int dst = findDst(p, menu, stack, want, reserve);
+        if (dst < 0) return false;
+        int rest = have - want;
+        clickQ.add(new int[]{src, 0}); // 拿起整堆
+        if (want <= rest) {
+            for (int k = 0; k < want; k++) clickQ.add(new int[]{dst, 1}); // 要的数量，一个一个放进背包
+            clickQ.add(new int[]{src, 0});                                // 剩下的整堆放回容器
+        } else {
+            for (int k = 0; k < rest; k++) clickQ.add(new int[]{src, 1}); // 多出来的，一个一个放回容器
+            clickQ.add(new int[]{dst, 0});                                // 手上剩下的就是要的数量，整堆放进背包
+        }
+        xpPlans++;
+        return true;
     }
 
     /* ========== 通用小工具 ========== */
