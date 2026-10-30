@@ -56,6 +56,8 @@ import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.world.item.component.ItemContainerContents;
 import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.BlockHitResult;
@@ -2195,15 +2197,31 @@ private static final class ElytraPilot {
                 // C. 火箭还不够（或者需要经验瓶但没有）：再拿出一个潜影盒，按格子顺序往后翻
                 tookBox = false;
                 if (!stuck && ourSlot < 0 && boxRounds < MAX_BOX_ROUNDS && needMoreSupplies(p)) {
-                    for (int i = boxScanFrom; i < total; i++) {
-                        if (menu.getSlot(i).getItem().is(ItemTags.SHULKER_BOXES)) {
-                            takeSnap = shulkerMask(p); // 拿之前背包里已有的潜影盒，都是别人的
-                            InvUtils.shiftClick().slotId(i);
-                            boxScanFrom = i + 1;
-                            boxRounds++;
-                            tookBox = true;
-                            break;
+                    // 直接读潜影盒物品自带的内容数据（客户端本来就知道），
+                    // 只拿真正装着火箭/经验瓶的盒子，里面是空的或装别的东西的不动
+                    boolean needRockets = count(p, Items.FIREWORK_ROCKET) < ENOUGH_ROCKETS;
+                    boolean needXp = repairing && count(p, Items.EXPERIENCE_BOTTLE) == 0;
+                    int bestSlot = -1, bestScore = 0, seenBoxes = 0;
+                    for (int i = 0; i < total; i++) {
+                        ItemStack it = menu.getSlot(i).getItem();
+                        if (!it.is(ItemTags.SHULKER_BOXES)) continue;
+                        seenBoxes++;
+                        int score = 0;
+                        if (needRockets) score += countInBox(it, Items.FIREWORK_ROCKET);
+                        if (needXp) score += countInBox(it, Items.EXPERIENCE_BOTTLE) * 64;
+                        if (score > bestScore) { // 优先拿装得最多的，少开几个盒子
+                            bestScore = score;
+                            bestSlot = i;
                         }
+                    }
+                    if (bestSlot >= 0) {
+                        takeSnap = shulkerMask(p); // 拿之前背包里已有的潜影盒，都是别人的
+                        InvUtils.shiftClick().slotId(bestSlot);
+                        boxRounds++;
+                        tookBox = true;
+                        say("选中一个装有物资的潜影盒（共扫描 " + seenBoxes + " 个）");
+                    } else if (seenBoxes > 0) {
+                        say("末影箱里的 " + seenBoxes + " 个潜影盒都没有火箭/经验瓶，不用拿出来");
                     }
                 }
 
@@ -2517,6 +2535,17 @@ private static final class ElytraPilot {
             if (!s.isEmpty() && s.is(ItemTags.PICKAXES)) return i;
         }
         return -1;
+    }
+
+    // 读潜影盒物品里装的东西（不用放下来、不用打开）：数里面有多少个某物品
+    private static int countInBox(ItemStack box, Item item) {
+        ItemContainerContents c = box.get(DataComponents.CONTAINER);
+        if (c == null) return 0;
+        int n = 0;
+        for (ItemStack s : c.nonEmptyItems()) {
+            if (s.is(item)) n += s.getCount();
+        }
+        return n;
     }
 
     // 火箭还不够，或者要修鞘翅但背包里没有经验瓶：还需要继续翻潜影盒
