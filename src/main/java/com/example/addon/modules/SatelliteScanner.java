@@ -2201,7 +2201,7 @@ private static final class ElytraPilot {
 
                 // B. 拿散放在末影箱里的火箭/经验瓶：经验瓶只拿估算要用的数量，
                 //    背包要给潜影盒留空位（只拿火箭或只拿经验留 1 格，两样都拿留 2 格）
-                if (drainClicks()) return; // 先把排好队的点击发完
+                if (drainClicks(mc, p)) return; // 先把排好队的点击发完
                 if (!stuck && takeFrom(p, menu, total)) return;
 
                 // C. 火箭还不够（或者需要经验瓶但没有）：再拿出一个潜影盒，按格子顺序往后翻
@@ -2354,7 +2354,7 @@ private static final class ElytraPilot {
 
                 AbstractContainerMenu menu = p.containerMenu;
                 int total = menu.slots.size() - 36;
-                if (drainClicks()) return; // 先把排好队的点击发完
+                if (drainClicks(mc, p)) return; // 先把排好队的点击发完
                 boolean more = takeFrom(p, menu, total); // 经验瓶只拿要用的数量，剩下的留在盒子里
                 if (!more || takePass > 80) { // 拿完了，或者拿了很久还没拿完（背包满了之类）
                     clickQ.clear();
@@ -2642,15 +2642,48 @@ private static final class ElytraPilot {
     /* ========== 从当前打开的容器里拿东西 ========== */
 
     // 每 tick 最多发 4 个排队的点击，发完返回 false。返回 true 表示这 tick 还在发点击，别的先等等
-    private boolean drainClicks() {
+    private boolean drainClicks(Minecraft mc, LocalPlayer p) {
         if (clickQ.isEmpty()) return false;
         for (int n = 0; n < 4 && !clickQ.isEmpty(); n++) {
             int[] c = clickQ.poll();
-            // data(1) = 右键，data(0) = 左键。如果 InvUtils.Action 在你这个版本里没有 data()，
-            // 就改成直接调 mc.gameMode 的容器点击方法
-            InvUtils.click().data(c[1]).slotId(c[0]);
+            rawClick(mc, p, c[0], c[1]);
         }
         return true;
+    }
+
+    // InvUtils.Action 没有指定鼠标键的方法，所以直接调 MultiPlayerGameMode 的容器点击方法。
+    // 这个方法的名字每个版本都在改（handleInventoryMouseClick / handleContainerInput ...），
+    // 所以不写死名字，按参数签名 (int容器id, int格子, int鼠标键, 枚举点击类型, 玩家) 反射找，
+    // 点击类型取名叫 PICKUP 的那个枚举值（拿起/放下，button 0 = 左键，1 = 右键）。
+    private static java.lang.reflect.Method clickMethod;
+    private static Object pickupConst;
+    private static boolean clickInit;
+
+    private static void rawClick(Minecraft mc, LocalPlayer p, int slotId, int button) {
+        try {
+            if (!clickInit) {
+                clickInit = true;
+                for (java.lang.reflect.Method m : net.minecraft.client.multiplayer.MultiPlayerGameMode.class.getMethods()) {
+                    Class<?>[] t = m.getParameterTypes();
+                    if (t.length == 5 && t[0] == int.class && t[1] == int.class && t[2] == int.class
+                        && t[3].isEnum() && t[4].isAssignableFrom(LocalPlayer.class)) {
+                        Object[] cs = t[3].getEnumConstants();
+                        Object pk = null;
+                        for (Object c : cs) {
+                            if (((Enum<?>) c).name().equals("PICKUP")) pk = c;
+                        }
+                        if (pk == null && cs.length > 0) pk = cs[0]; // PICKUP 是第一个
+                        clickMethod = m;
+                        pickupConst = pk;
+                        break;
+                    }
+                }
+            }
+            if (clickMethod != null && p.containerMenu != null) {
+                clickMethod.invoke(mc.gameMode, p.containerMenu.containerId, slotId, button, pickupConst, p);
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     // 拿火箭（整堆 shift 点击）和经验瓶（精确数量），都要给潜影盒留空位。
